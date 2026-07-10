@@ -3,8 +3,8 @@ use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::record::RData;
 use crate::protocol::types::RecordType;
-use crate::transport::{self, QueryResult};
 use crate::resolver;
+use crate::transport::{self, QueryResult};
 use std::time::Duration;
 
 const ROOT_SERVERS: [&str; 13] = [
@@ -46,8 +46,7 @@ pub fn perform_trace(
 
         for server in &current_servers {
             let query_result = (|| -> Result<QueryResult, DnsError> {
-                let (query, query_id) =
-                    DnsMessage::build_query(name, qtype, false, Some(&edns))?;
+                let (query, query_id) = DnsMessage::build_query(name, qtype, false, Some(&edns))?;
                 let r = transport::send_query(server, 53, &query, false, timeout, 4096)?;
                 transport::verify_id(&r.message.header, query_id)?;
                 Ok(r)
@@ -66,15 +65,17 @@ pub fn perform_trace(
         let hop_result = match winning_response {
             Some(r) => r,
             None => {
-                return Err(DnsError::Network(
-                    "trace: no server responded".into(),
-                ));
+                return Err(DnsError::Network("trace: no server responded".into()));
             }
         };
 
         // If we got an answer (non-referral), we're done
         let has_answers = !hop_result.message.answers.is_empty();
-        let has_soa_authority = hop_result.message.authority.iter().any(|rr| rr.rtype == RecordType::SOA);
+        let has_soa_authority = hop_result
+            .message
+            .authority
+            .iter()
+            .any(|rr| rr.rtype == RecordType::SOA);
 
         hops.push(TraceHop {
             server: used_server,
@@ -108,9 +109,8 @@ pub fn perform_trace(
         for ns_name in &ns_names {
             for rr in &last.result.message.additional {
                 if rr.name == *ns_name {
-                    match &rr.rdata {
-                        RData::A(addr) => next_servers.push(addr.to_string()),
-                        _ => {}
+                    if let RData::A(addr) = &rr.rdata {
+                        next_servers.push(addr.to_string());
                     }
                 }
             }

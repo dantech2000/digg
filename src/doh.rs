@@ -14,11 +14,7 @@ pub fn resolve_doh_url(provider_or_url: &str) -> String {
     }
 }
 
-pub fn send_doh_query(
-    url: &str,
-    query: &[u8],
-    timeout: Duration,
-) -> Result<QueryResult, DnsError> {
+pub fn send_doh_query(url: &str, query: &[u8], timeout: Duration) -> Result<QueryResult, DnsError> {
     let start = Instant::now();
 
     let response = ureq::post(url)

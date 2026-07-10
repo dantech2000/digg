@@ -77,7 +77,11 @@ fn send_udp(
     let socket_addr: std::net::SocketAddr = addr
         .parse()
         .map_err(|e| DnsError::Network(format!("invalid address '{}': {}", addr, e)))?;
-    let bind_addr = if socket_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind_addr = if socket_addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let socket = UdpSocket::bind(bind_addr)
         .map_err(|e| DnsError::Network(format!("failed to bind UDP socket: {}", e)))?;
     socket
@@ -154,10 +158,7 @@ fn send_tcp(
 
 /// Send a TCP query on an already-connected stream and return the raw response bytes.
 /// Used by AXFR which needs to read multiple messages from one connection.
-pub fn send_tcp_raw(
-    stream: &mut TcpStream,
-    query: &[u8],
-) -> Result<(), DnsError> {
+pub fn send_tcp_raw(stream: &mut TcpStream, query: &[u8]) -> Result<(), DnsError> {
     let len = (query.len() as u16).to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(query)?;

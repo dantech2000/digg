@@ -11,16 +11,46 @@ pub struct PropagationResolver {
 }
 
 pub const PUBLIC_RESOLVERS: &[PropagationResolver] = &[
-    PropagationResolver { name: "Google", ip: "8.8.8.8" },
-    PropagationResolver { name: "Cloudflare", ip: "1.1.1.1" },
-    PropagationResolver { name: "Quad9", ip: "9.9.9.9" },
-    PropagationResolver { name: "OpenDNS", ip: "208.67.222.222" },
-    PropagationResolver { name: "Level3", ip: "4.2.2.1" },
-    PropagationResolver { name: "CleanBrowsing", ip: "185.228.168.9" },
-    PropagationResolver { name: "AdGuard", ip: "94.140.14.14" },
-    PropagationResolver { name: "Comodo", ip: "8.26.56.26" },
-    PropagationResolver { name: "Verisign", ip: "64.6.64.6" },
-    PropagationResolver { name: "Yandex", ip: "77.88.8.8" },
+    PropagationResolver {
+        name: "Google",
+        ip: "8.8.8.8",
+    },
+    PropagationResolver {
+        name: "Cloudflare",
+        ip: "1.1.1.1",
+    },
+    PropagationResolver {
+        name: "Quad9",
+        ip: "9.9.9.9",
+    },
+    PropagationResolver {
+        name: "OpenDNS",
+        ip: "208.67.222.222",
+    },
+    PropagationResolver {
+        name: "Level3",
+        ip: "4.2.2.1",
+    },
+    PropagationResolver {
+        name: "CleanBrowsing",
+        ip: "185.228.168.9",
+    },
+    PropagationResolver {
+        name: "AdGuard",
+        ip: "94.140.14.14",
+    },
+    PropagationResolver {
+        name: "Comodo",
+        ip: "8.26.56.26",
+    },
+    PropagationResolver {
+        name: "Verisign",
+        ip: "64.6.64.6",
+    },
+    PropagationResolver {
+        name: "Yandex",
+        ip: "77.88.8.8",
+    },
 ];
 
 pub struct PropagationResult {
@@ -51,9 +81,8 @@ pub fn check_propagation(
                     let result = (|| -> Result<QueryResult, DnsError> {
                         let (query, query_id) =
                             DnsMessage::build_query(name, qtype, true, Some(edns))?;
-                        let r = transport::send_query(
-                            resolver.ip, 53, &query, false, timeout, 4096,
-                        )?;
+                        let r =
+                            transport::send_query(resolver.ip, 53, &query, false, timeout, 4096)?;
                         transport::verify_id(&r.message.header, query_id)?;
                         Ok(r)
                     })();

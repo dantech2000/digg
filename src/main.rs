@@ -167,8 +167,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             println!();
         }
 
-        let (query, query_id) =
-            DnsMessage::build_query(name, *qtype, opts.recurse, edns.as_ref())?;
+        let (query, query_id) = DnsMessage::build_query(name, *qtype, opts.recurse, edns.as_ref())?;
 
         let result = if opts.dot {
             dot::send_dot_query(&server, &query, timeout)?

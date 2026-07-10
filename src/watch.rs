@@ -7,6 +7,7 @@ use crate::transport;
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_watch(
     server: &str,
     port: u16,
@@ -46,8 +47,7 @@ pub fn run_watch(
 
         // Execute query
         let result = (|| -> Result<transport::QueryResult, DnsError> {
-            let (query, query_id) =
-                DnsMessage::build_query(name, qtype, true, Some(&edns))?;
+            let (query, query_id) = DnsMessage::build_query(name, qtype, true, Some(&edns))?;
             let r = transport::send_query(server, port, &query, force_tcp, timeout, 4096)?;
             transport::verify_id(&r.message.header, query_id)?;
             Ok(r)

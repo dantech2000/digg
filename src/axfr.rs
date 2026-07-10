@@ -1,7 +1,7 @@
 use crate::error::DnsError;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::record::ResourceRecord;
-use crate::protocol::types::{RecordType, Rcode};
+use crate::protocol::types::{Rcode, RecordType};
 use crate::transport;
 use std::net::TcpStream;
 use std::time::Duration;

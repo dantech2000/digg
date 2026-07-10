@@ -255,11 +255,10 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
         let bar_width = 30;
 
         for (upper, count) in &result.histogram {
-            let bar_len = if max_count > 0 {
-                (*count * bar_width) / max_count
-            } else {
-                0
-            };
+            let bar_len = count
+                .saturating_mul(bar_width)
+                .checked_div(max_count)
+                .unwrap_or(0);
             let bar: String = "\u{2588}".repeat(bar_len);
             let label = format!("{:>7.1}ms", upper);
             let _ = writeln!(
@@ -405,7 +404,12 @@ pub fn print_batch_result(
                 rcode,
                 elapsed,
             );
-            let values: Vec<String> = r.message.answers.iter().map(|rr| rr.rdata.to_string()).collect();
+            let values: Vec<String> = r
+                .message
+                .answers
+                .iter()
+                .map(|rr| rr.rdata.to_string())
+                .collect();
             let _ = writeln!(out, "{}", painter.paint(GREEN, &values.join(", ")));
         }
         Err(e) => {
@@ -449,7 +453,12 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
 
     for propagation_result in results {
         let _ = writeln!(out);
-        let label = format!("{:<width$} ({})", propagation_result.resolver_name, propagation_result.resolver_ip, width = name_width);
+        let label = format!(
+            "{:<width$} ({})",
+            propagation_result.resolver_name,
+            propagation_result.resolver_ip,
+            width = name_width
+        );
         match &propagation_result.result {
             Ok(r) => {
                 let elapsed = r.elapsed.as_millis();

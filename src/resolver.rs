@@ -3,9 +3,8 @@ use std::fs;
 
 /// Read /etc/resolv.conf and return the first nameserver IP.
 pub fn system_nameserver() -> Result<String, DnsError> {
-    let contents = fs::read_to_string("/etc/resolv.conf").map_err(|e| {
-        DnsError::Network(format!("failed to read /etc/resolv.conf: {}", e))
-    })?;
+    let contents = fs::read_to_string("/etc/resolv.conf")
+        .map_err(|e| DnsError::Network(format!("failed to read /etc/resolv.conf: {}", e)))?;
 
     for line in contents.lines() {
         let line = line.trim();
