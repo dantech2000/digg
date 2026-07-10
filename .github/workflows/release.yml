@@ -35,8 +35,14 @@ jobs:
           shasum -a 256 "dist/$archive" > "dist/$archive.sha256"
       - uses: actions/upload-artifact@v7
         with:
-          name: digg-${{ matrix.asset_suffix }}
-          path: dist/
+          name: digg-${{ matrix.asset_suffix }}-archive
+          path: dist/*.tar.gz
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digg-${{ matrix.asset_suffix }}-checksum
+          path: dist/*.sha256
           archive: false
           if-no-files-found: error
 
