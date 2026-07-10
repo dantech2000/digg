@@ -1,4 +1,5 @@
 use crate::error::DnsError;
+use crate::output::ColorMode;
 use crate::protocol::types::RecordType;
 
 pub fn load_config_file() -> Vec<String> {
@@ -26,6 +27,7 @@ pub struct Options {
     pub qtype: RecordType,
     pub port: u16,
     pub short: bool,
+    pub color: ColorMode,
     pub tcp: Option<bool>,
     pub recurse: bool,
     pub show_authority: bool,
@@ -56,6 +58,7 @@ impl Default for Options {
             qtype: RecordType::A,
             port: 53,
             short: false,
+            color: ColorMode::Auto,
             tcp: None,
             recurse: true,
             show_authority: true,
@@ -94,6 +97,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         let arg = &args[i];
 
         if arg == "--help" || arg == "-h" {
+            crate::output::set_color_mode(opts.color);
             print_usage();
             std::process::exit(0);
         }
@@ -252,6 +256,8 @@ fn resolve_queries_from_positionals(
 fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
     match arg {
         "+short" => opts.short = true,
+        "+color" => opts.color = ColorMode::Always,
+        "+nocolor" => opts.color = ColorMode::Never,
         "+tcp" => opts.tcp = Some(true),
         "+notcp" => opts.tcp = Some(false),
         "+recurse" => opts.recurse = true,
@@ -340,7 +346,7 @@ fn reverse_name(addr: &str) -> Result<String, DnsError> {
 }
 
 pub fn print_usage() {
-    let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let color = crate::output::stdout_color_enabled();
 
     let (bold, dim, cyan, green, yellow, reset) = if color {
         (
@@ -393,6 +399,8 @@ pub fn print_usage() {
     {yellow}+doh=URL{reset}        Use DNS-over-HTTPS via custom URL
 
 {bold}DISPLAY:{reset}
+    {yellow}+color{reset}          Force color output
+    {yellow}+nocolor{reset}        Disable color output
     {yellow}+authority{reset}      Show authority section {dim}(default){reset}
     {yellow}+noauthority{reset}    Hide authority section
     {yellow}+additional{reset}     Show additional section {dim}(default){reset}

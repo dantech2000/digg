@@ -37,6 +37,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
     let mut all_args = config_args;
     all_args.extend_from_slice(args);
     let opts = cli::parse_args(&all_args)?;
+    output::set_color_mode(opts.color);
     let timeout = Duration::from_secs(opts.timeout);
 
     // Build EDNS options

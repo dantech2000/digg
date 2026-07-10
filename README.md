@@ -37,6 +37,11 @@ digg -x 2001:4860:4860::8888           # Explicit reverse
 digg example.com +short                 # Terse output
 digg example.com +json                  # JSON output
 digg example.com +yaml                  # YAML output
+
+# Color control
+NO_COLOR=1 digg example.com              # Disable color using the standard convention
+digg example.com +nocolor                # Disable color for one invocation
+digg example.com +color | less -R        # Preserve color through a compatible pipe
 ```
 
 ## Features
@@ -163,6 +168,8 @@ Put default options in `~/.diggrc`, one per line, applied before CLI args. Lines
 | `+short`       | Terse output (one value per line)        |
 | `+json`        | JSON output                              |
 | `+yaml`        | YAML output                              |
+| `+color`       | Force color output                       |
+| `+nocolor`     | Disable color output                     |
 | `+tcp`         | Force TCP                                |
 | `+timeout=N`   | Timeout in seconds (default: 5)          |
 | `+dot`         | DNS-over-TLS                             |
