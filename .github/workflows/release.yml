@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            asset_suffix: darwin_amd64
+          - runner: macos-14
+            asset_suffix: darwin_arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          test "$version" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          cargo build --release --locked
+          mkdir -p dist
+          archive="digg_${version}_${{ matrix.asset_suffix }}.tar.gz"
+          tar -C target/release -czf "dist/$archive" digg
+          shasum -a 256 "dist/$archive" > "dist/$archive.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digg-${{ matrix.asset_suffix }}
+          path: dist/
+          archive: false
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: digg-*
+          merge-multiple: true
+      - name: Verify release prerequisites
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$HOMEBREW_TAP_TOKEN" || {
+            echo "HOMEBREW_TAP_TOKEN must have Contents read/write access to dantech2000/homebrew-tap." >&2
+            exit 1
+          }
+          test -f release-assets/digg_${GITHUB_REF_NAME#v}_darwin_amd64.tar.gz
+          test -f release-assets/digg_${GITHUB_REF_NAME#v}_darwin_arm64.tar.gz
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes
+      - name: Update Homebrew Cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          intel_sha="$(awk '{print $1}' "release-assets/digg_${version}_darwin_amd64.tar.gz.sha256")"
+          arm_sha="$(awk '{print $1}' "release-assets/digg_${version}_darwin_arm64.tar.gz.sha256")"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/dantech2000/homebrew-tap.git" homebrew-tap
+          ./scripts/update-homebrew-cask.sh homebrew-tap "$version" "$intel_sha" "$arm_sha"
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Casks/digg.rb
+          git -C homebrew-tap commit -m "chore: update digg cask to ${version}"
+          git -C homebrew-tap push

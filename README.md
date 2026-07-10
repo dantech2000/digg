@@ -9,6 +9,22 @@ cargo build --release
 cp target/release/digg /usr/local/bin/
 ```
 
+Once a release is published, you can install the prebuilt macOS binary with
+Homebrew:
+
+```sh
+brew install --cask dantech2000/tap/digg
+```
+
+### Release maintainer setup
+
+The tag-triggered release workflow updates the Homebrew Cask after publishing
+the GitHub Release. Before cutting the first release, create a fine-grained
+personal access token with **Contents: Read and write** access limited to
+[`dantech2000/homebrew-tap`](https://github.com/dantech2000/homebrew-tap), and
+save it as the `HOMEBREW_TAP_TOKEN` Actions secret in this repository. The tag
+must use the `vX.Y.Z` form and match the version in `Cargo.toml`.
+
 ## Usage
 
 ```
