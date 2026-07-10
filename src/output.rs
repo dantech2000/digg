@@ -59,29 +59,29 @@ pub fn print_full(
     show_authority: bool,
     show_additional: bool,
 ) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
     // Answer section
     if !result.message.answers.is_empty() {
         let _ = writeln!(out);
-        let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "ANSWER"));
-        print_record_table(&mut out, &p, &result.message.answers);
+        let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ANSWER"));
+        print_record_table(&mut out, &painter, &result.message.answers);
     }
 
     // Authority section
     if show_authority && !result.message.authority.is_empty() {
         let _ = writeln!(out);
-        let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "AUTHORITY"));
-        print_record_table(&mut out, &p, &result.message.authority);
+        let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "AUTHORITY"));
+        print_record_table(&mut out, &painter, &result.message.authority);
     }
 
     // Additional section
     if show_additional && !result.message.additional.is_empty() {
         let _ = writeln!(out);
-        let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "ADDITIONAL"));
-        print_record_table(&mut out, &p, &result.message.additional);
+        let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ADDITIONAL"));
+        print_record_table(&mut out, &painter, &result.message.additional);
     }
 
     // EDNS info
@@ -91,7 +91,7 @@ pub fn print_full(
         let _ = writeln!(
             out,
             " {} version {}; flags: {}; udp: {}",
-            p.paint(DIM, "EDNS"),
+            painter.paint(DIM, "EDNS"),
             edns.version,
             flags,
             edns.udp_payload_size
@@ -99,28 +99,28 @@ pub fn print_full(
     }
 
     // DNSSEC flags
-    let h = &result.message.header;
-    if h.ad || h.cd {
+    let header = &result.message.header;
+    if header.ad || header.cd {
         let mut flags = Vec::new();
-        if h.ad {
+        if header.ad {
             flags.push("ad");
         }
-        if h.cd {
+        if header.cd {
             flags.push("cd");
         }
-        let _ = writeln!(out, " {} {}", p.paint(DIM, "flags:"), flags.join(" "));
+        let _ = writeln!(out, " {} {}", painter.paint(DIM, "flags:"), flags.join(" "));
     }
 
     // Status line
     let _ = writeln!(out);
     let elapsed_ms = result.elapsed.as_millis();
     let rcode = &result.message.header.rcode;
-    let rcode_str = format_rcode(&p, rcode);
+    let rcode_str = format_rcode(&painter, rcode);
 
-    let sep = p.paint(DIM, "\u{2500}\u{2500}");
-    let server_info = p.paint(DIM, &format!("{}:{} ({})", server, port, result.protocol));
-    let timing = p.paint(DIM, &format!("{}ms", elapsed_ms));
-    let size = p.paint(DIM, &format!("{}B", result.bytes));
+    let sep = painter.paint(DIM, "\u{2500}\u{2500}");
+    let server_info = painter.paint(DIM, &format!("{}:{} ({})", server, port, result.protocol));
+    let timing = painter.paint(DIM, &format!("{}ms", elapsed_ms));
+    let size = painter.paint(DIM, &format!("{}B", result.bytes));
     let _ = writeln!(
         out,
         " {} {} {} {} {} {} {} {} {}",
@@ -166,7 +166,7 @@ impl<'a> JsonOutput<'a> {
 // === Trace output ===
 
 pub fn print_trace(hops: &[TraceHop]) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -175,30 +175,30 @@ pub fn print_trace(hops: &[TraceHop]) {
         let _ = writeln!(
             out,
             " {} {} {}",
-            p.paint(BOLD_WHITE, &format!("HOP {}", i + 1)),
-            p.paint(DIM, "from"),
-            p.paint(BOLD_GREEN, &hop.server),
+            painter.paint(BOLD_WHITE, &format!("HOP {}", i + 1)),
+            painter.paint(DIM, "from"),
+            painter.paint(BOLD_GREEN, &hop.server),
         );
 
         let elapsed = hop.result.elapsed.as_millis();
-        let _ = writeln!(out, " {} {}ms", p.paint(DIM, "time:"), elapsed);
+        let _ = writeln!(out, " {} {}ms", painter.paint(DIM, "time:"), elapsed);
 
         // Show answers if present
         if !hop.result.message.answers.is_empty() {
-            let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "ANSWER"));
-            print_record_table(&mut out, &p, &hop.result.message.answers);
+            let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ANSWER"));
+            print_record_table(&mut out, &painter, &hop.result.message.answers);
         }
 
         // Show authority section
         if !hop.result.message.authority.is_empty() {
-            let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "AUTHORITY"));
-            print_record_table(&mut out, &p, &hop.result.message.authority);
+            let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "AUTHORITY"));
+            print_record_table(&mut out, &painter, &hop.result.message.authority);
         }
 
         // Show additional section (glue records)
         if !hop.result.message.additional.is_empty() {
-            let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "ADDITIONAL"));
-            print_record_table(&mut out, &p, &hop.result.message.additional);
+            let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ADDITIONAL"));
+            print_record_table(&mut out, &painter, &hop.result.message.additional);
         }
     }
     let _ = writeln!(out);
@@ -207,7 +207,7 @@ pub fn print_trace(hops: &[TraceHop]) {
 // === Benchmark output ===
 
 pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -215,24 +215,24 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
     let _ = writeln!(
         out,
         " {} {} {} @{}",
-        p.paint(BOLD_WHITE, "BENCHMARK"),
-        p.paint(CYAN, name),
-        p.paint(BOLD_CYAN, qtype),
-        p.paint(GREEN, server),
+        painter.paint(BOLD_WHITE, "BENCHMARK"),
+        painter.paint(CYAN, name),
+        painter.paint(BOLD_CYAN, qtype),
+        painter.paint(GREEN, server),
     );
     let _ = writeln!(
         out,
         " queries: {} successful, {} failed",
-        p.paint(GREEN, &result.successful.to_string()),
+        painter.paint(GREEN, &result.successful.to_string()),
         if result.failed > 0 {
-            p.paint(RED, &result.failed.to_string())
+            painter.paint(RED, &result.failed.to_string())
         } else {
-            p.paint(DIM, "0")
+            painter.paint(DIM, "0")
         },
     );
 
     if result.successful == 0 {
-        let _ = writeln!(out, " {}", p.paint(RED, "no successful queries"));
+        let _ = writeln!(out, " {}", painter.paint(RED, "no successful queries"));
         return;
     }
 
@@ -240,7 +240,7 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
     let _ = writeln!(
         out,
         " {}",
-        p.paint(DIM, "  min     avg     p50     p90     p99     max")
+        painter.paint(DIM, "  min     avg     p50     p90     p99     max")
     );
     let _ = writeln!(
         out,
@@ -265,9 +265,9 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
             let _ = writeln!(
                 out,
                 " {} {} {}",
-                p.paint(DIM, &label),
-                p.paint(GREEN, &format!("{:<width$}", bar, width = bar_width)),
-                p.paint(DIM, &count.to_string()),
+                painter.paint(DIM, &label),
+                painter.paint(GREEN, &format!("{:<width$}", bar, width = bar_width)),
+                painter.paint(DIM, &count.to_string()),
             );
         }
     }
@@ -277,7 +277,7 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
 // === AXFR output ===
 
 pub fn print_axfr(records: &[ResourceRecord]) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -285,19 +285,19 @@ pub fn print_axfr(records: &[ResourceRecord]) {
     let _ = writeln!(
         out,
         " {} ({} records)",
-        p.paint(BOLD_WHITE, "ZONE TRANSFER"),
+        painter.paint(BOLD_WHITE, "ZONE TRANSFER"),
         records.len()
     );
     let _ = writeln!(out);
 
-    print_record_table(&mut out, &p, records);
+    print_record_table(&mut out, &painter, records);
     let _ = writeln!(out);
 }
 
 // === Comparison output ===
 
 pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -305,29 +305,29 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
     let _ = writeln!(
         out,
         " {} {} {}",
-        p.paint(BOLD_WHITE, "COMPARING"),
-        p.paint(CYAN, name),
-        p.paint(BOLD_CYAN, qtype),
+        painter.paint(BOLD_WHITE, "COMPARING"),
+        painter.paint(CYAN, name),
+        painter.paint(BOLD_CYAN, qtype),
     );
 
     // Collect answer strings for diff comparison
     let mut answer_sets: Vec<(String, Vec<String>, Option<u128>)> = Vec::new();
 
-    for cr in results {
+    for comparison in results {
         let _ = writeln!(out);
-        match &cr.result {
+        match &comparison.result {
             Ok(r) => {
                 let elapsed = r.elapsed.as_millis();
                 let _ = writeln!(
                     out,
                     " {} {} ({}ms)",
-                    p.paint(BOLD_YELLOW, &format!("@{}", cr.server)),
-                    format_rcode(&p, &r.message.header.rcode),
+                    painter.paint(BOLD_YELLOW, &format!("@{}", comparison.server)),
+                    format_rcode(&painter, &r.message.header.rcode),
                     elapsed,
                 );
 
                 if !r.message.answers.is_empty() {
-                    print_record_table(&mut out, &p, &r.message.answers);
+                    print_record_table(&mut out, &painter, &r.message.answers);
                 }
 
                 let answers: Vec<String> = r
@@ -336,16 +336,16 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
                     .iter()
                     .map(|rr| format!("{} {} {}", rr.rtype, rr.name, rr.rdata))
                     .collect();
-                answer_sets.push((cr.server.clone(), answers, Some(elapsed)));
+                answer_sets.push((comparison.server.clone(), answers, Some(elapsed)));
             }
             Err(e) => {
                 let _ = writeln!(
                     out,
                     " {} {}",
-                    p.paint(BOLD_YELLOW, &format!("@{}", cr.server)),
-                    p.paint(RED, &format!("error: {}", e)),
+                    painter.paint(BOLD_YELLOW, &format!("@{}", comparison.server)),
+                    painter.paint(RED, &format!("error: {}", e)),
                 );
-                answer_sets.push((cr.server.clone(), Vec::new(), None));
+                answer_sets.push((comparison.server.clone(), Vec::new(), None));
             }
         }
     }
@@ -353,15 +353,15 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
     // Summary
     if answer_sets.len() >= 2 {
         let _ = writeln!(out);
-        let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "SUMMARY"));
+        let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "SUMMARY"));
 
         // Check if all answers are identical
         let first_answers = &answer_sets[0].1;
         let all_identical = answer_sets.iter().all(|(_, a, _)| a == first_answers);
         if all_identical {
-            let _ = writeln!(out, " answers: {}", p.paint(GREEN, "identical"));
+            let _ = writeln!(out, " answers: {}", painter.paint(GREEN, "identical"));
         } else {
-            let _ = writeln!(out, " answers: {}", p.paint(YELLOW, "differ"));
+            let _ = writeln!(out, " answers: {}", painter.paint(YELLOW, "differ"));
         }
 
         // Find fastest
@@ -374,7 +374,7 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
             let _ = writeln!(
                 out,
                 " fastest: {} ({}ms)",
-                p.paint(GREEN, &format!("@{}", fastest)),
+                painter.paint(GREEN, &format!("@{}", fastest)),
                 ms,
             );
         }
@@ -389,32 +389,32 @@ pub fn print_batch_result(
     qtype: &crate::protocol::types::RecordType,
     result: &Result<QueryResult, crate::error::DnsError>,
 ) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
     match result {
         Ok(r) => {
             let elapsed = r.elapsed.as_millis();
-            let rcode = format_rcode(&p, &r.message.header.rcode);
+            let rcode = format_rcode(&painter, &r.message.header.rcode);
             let _ = write!(
                 out,
                 " {} {} {} {}ms ",
-                p.paint(BOLD_CYAN, &qtype.to_string()),
+                painter.paint(BOLD_CYAN, &qtype.to_string()),
                 name,
                 rcode,
                 elapsed,
             );
             let values: Vec<String> = r.message.answers.iter().map(|rr| rr.rdata.to_string()).collect();
-            let _ = writeln!(out, "{}", p.paint(GREEN, &values.join(", ")));
+            let _ = writeln!(out, "{}", painter.paint(GREEN, &values.join(", ")));
         }
         Err(e) => {
             let _ = writeln!(
                 out,
                 " {} {} {}",
-                p.paint(BOLD_CYAN, &qtype.to_string()),
+                painter.paint(BOLD_CYAN, &qtype.to_string()),
                 name,
-                p.paint(RED, &format!("error: {}", e)),
+                painter.paint(RED, &format!("error: {}", e)),
             );
         }
     }
@@ -423,7 +423,7 @@ pub fn print_batch_result(
 // === Propagation output ===
 
 pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str) {
-    let p = Painter::new();
+    let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -431,9 +431,9 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
     let _ = writeln!(
         out,
         " {} {} {}",
-        p.paint(BOLD_WHITE, "PROPAGATION CHECK"),
-        p.paint(CYAN, name),
-        p.paint(BOLD_CYAN, qtype),
+        painter.paint(BOLD_WHITE, "PROPAGATION CHECK"),
+        painter.paint(CYAN, name),
+        painter.paint(BOLD_CYAN, qtype),
     );
 
     let mut answer_groups: std::collections::HashMap<String, Vec<&str>> =
@@ -447,17 +447,17 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
         .max()
         .unwrap_or(8);
 
-    for pr in results {
+    for propagation_result in results {
         let _ = writeln!(out);
-        let label = format!("{:<width$} ({})", pr.resolver_name, pr.resolver_ip, width = name_width);
-        match &pr.result {
+        let label = format!("{:<width$} ({})", propagation_result.resolver_name, propagation_result.resolver_ip, width = name_width);
+        match &propagation_result.result {
             Ok(r) => {
                 let elapsed = r.elapsed.as_millis();
-                let rcode_str = format_rcode(&p, &r.message.header.rcode);
+                let rcode_str = format_rcode(&painter, &r.message.header.rcode);
                 let _ = writeln!(
                     out,
                     " {} {} {}ms",
-                    p.paint(BOLD_YELLOW, &label),
+                    painter.paint(BOLD_YELLOW, &label),
                     rcode_str,
                     elapsed,
                 );
@@ -467,8 +467,8 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
                         let _ = writeln!(
                             out,
                             "   {} {}",
-                            p.paint(BOLD_CYAN, &rr.rtype.to_string()),
-                            format_rdata_colored(&p, &rr.rdata),
+                            painter.paint(BOLD_CYAN, &rr.rtype.to_string()),
+                            format_rdata_colored(&painter, &rr.rdata),
                         );
                     }
                 }
@@ -483,14 +483,14 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
                 answer_groups
                     .entry(answer_key)
                     .or_default()
-                    .push(pr.resolver_name);
+                    .push(propagation_result.resolver_name);
             }
             Err(e) => {
                 let _ = writeln!(
                     out,
                     " {} {}",
-                    p.paint(BOLD_YELLOW, &label),
-                    p.paint(RED, &format!("error: {}", e)),
+                    painter.paint(BOLD_YELLOW, &label),
+                    painter.paint(RED, &format!("error: {}", e)),
                 );
                 errors += 1;
             }
@@ -499,7 +499,7 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
 
     // Summary
     let _ = writeln!(out);
-    let _ = writeln!(out, " {}", p.paint(BOLD_WHITE, "SUMMARY"));
+    let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "SUMMARY"));
 
     let total = results.len();
     let successful = total - errors;
@@ -509,7 +509,7 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
             " {}/{} resolvers agree {} propagation complete",
             successful,
             total,
-            p.paint(GREEN, "\u{2014}"),
+            painter.paint(GREEN, "\u{2014}"),
         );
     } else if answer_groups.len() == 1 && errors > 0 {
         let _ = writeln!(
@@ -517,12 +517,12 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
             " {}/{} resolvers agree {} propagation complete",
             successful,
             total,
-            p.paint(GREEN, "\u{2014}"),
+            painter.paint(GREEN, "\u{2014}"),
         );
         let _ = writeln!(
             out,
             " {} resolver(s) unreachable",
-            p.paint(RED, &errors.to_string()),
+            painter.paint(RED, &errors.to_string()),
         );
     } else {
         // Find the largest group
@@ -532,14 +532,14 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
             " {}/{} resolvers agree {} {}",
             max_group,
             total,
-            p.paint(YELLOW, "\u{2014}"),
-            p.paint(YELLOW, "propagation incomplete"),
+            painter.paint(YELLOW, "\u{2014}"),
+            painter.paint(YELLOW, "propagation incomplete"),
         );
         if errors > 0 {
             let _ = writeln!(
                 out,
                 " {} resolver(s) unreachable",
-                p.paint(RED, &errors.to_string()),
+                painter.paint(RED, &errors.to_string()),
             );
         }
     }
@@ -548,7 +548,7 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
 
 // === Shared helpers ===
 
-fn print_record_table<W: Write>(out: &mut W, p: &Painter, records: &[ResourceRecord]) {
+fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceRecord]) {
     let type_width = records
         .iter()
         .map(|r| r.rtype.to_string().len())
@@ -575,20 +575,20 @@ fn print_record_table<W: Write>(out: &mut W, p: &Painter, records: &[ResourceRec
     let _ = writeln!(
         out,
         " {}   {}   {}   {}",
-        p.paint(DIM, &type_hdr),
-        p.paint(DIM, &name_hdr),
-        p.paint(DIM, &ttl_hdr),
-        p.paint(DIM, "VALUE"),
+        painter.paint(DIM, &type_hdr),
+        painter.paint(DIM, &name_hdr),
+        painter.paint(DIM, &ttl_hdr),
+        painter.paint(DIM, "VALUE"),
     );
 
     for rr in records {
         let type_pad = format!("{:<1$}", rr.rtype, type_width);
         let name_pad = format!("{:<1$}", rr.name, name_width);
         let ttl_pad = format!("{:<1$}", format_ttl(rr.ttl), ttl_width);
-        let type_str = p.paint(BOLD_CYAN, &type_pad);
+        let type_str = painter.paint(BOLD_CYAN, &type_pad);
         let name_str = name_pad;
-        let ttl_str = p.paint(DIM, &ttl_pad);
-        let value_str = format_rdata_colored(p, &rr.rdata);
+        let ttl_str = painter.paint(DIM, &ttl_pad);
+        let value_str = format_rdata_colored(painter, &rr.rdata);
 
         let _ = writeln!(
             out,
@@ -598,27 +598,27 @@ fn print_record_table<W: Write>(out: &mut W, p: &Painter, records: &[ResourceRec
     }
 }
 
-fn format_rdata_colored(p: &Painter, rdata: &RData) -> String {
+fn format_rdata_colored(painter: &Painter, rdata: &RData) -> String {
     let text = rdata.to_string();
     if matches!(rdata, RData::A(_) | RData::AAAA(_)) {
-        p.paint(GREEN, &text)
+        painter.paint(GREEN, &text)
     } else if rdata.is_name() {
-        p.paint(YELLOW, &text)
+        painter.paint(YELLOW, &text)
     } else if rdata.is_dnssec() {
-        p.paint(BLUE, &text)
+        painter.paint(BLUE, &text)
     } else if rdata.is_text() {
-        p.paint(MAGENTA, &text)
+        painter.paint(MAGENTA, &text)
     } else {
         text
     }
 }
 
-fn format_rcode(p: &Painter, rcode: &Rcode) -> String {
+fn format_rcode(painter: &Painter, rcode: &Rcode) -> String {
     let text = rcode.to_string();
     match rcode {
-        Rcode::NoError => p.paint(GREEN, &text),
-        Rcode::NxDomain | Rcode::ServFail => p.paint(BOLD_RED, &text),
-        _ => p.paint(RED, &text),
+        Rcode::NoError => painter.paint(GREEN, &text),
+        Rcode::NxDomain | Rcode::ServFail => painter.paint(BOLD_RED, &text),
+        _ => painter.paint(RED, &text),
     }
 }
 

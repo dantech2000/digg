@@ -50,7 +50,7 @@ pub struct EdnsInfo {
 
 /// Parse EDNS info from an OPT record's raw fields.
 /// class_val = UDP payload size, ttl_val = extended RCODE + version + flags.
-pub fn parse_opt_record(class_val: u16, ttl_val: u32) -> EdnsInfo {
+pub fn decode_opt_record(class_val: u16, ttl_val: u32) -> EdnsInfo {
     let ttl_bytes = ttl_val.to_be_bytes();
     EdnsInfo {
         udp_payload_size: class_val,

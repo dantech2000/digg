@@ -41,7 +41,7 @@ pub fn perform_trace(
 
     for _ in 0..max_depth {
         // Try servers in order until one responds
-        let mut result: Option<QueryResult> = None;
+        let mut winning_response: Option<QueryResult> = None;
         let mut used_server = String::new();
 
         for server in &current_servers {
@@ -56,14 +56,14 @@ pub fn perform_trace(
             match query_result {
                 Ok(r) => {
                     used_server = server.clone();
-                    result = Some(r);
+                    winning_response = Some(r);
                     break;
                 }
                 Err(_) => continue,
             }
         }
 
-        let r = match result {
+        let hop_result = match winning_response {
             Some(r) => r,
             None => {
                 return Err(DnsError::Network(
@@ -73,12 +73,12 @@ pub fn perform_trace(
         };
 
         // If we got an answer (non-referral), we're done
-        let has_answers = !r.message.answers.is_empty();
-        let has_soa_authority = r.message.authority.iter().any(|rr| rr.rtype == RecordType::SOA);
+        let has_answers = !hop_result.message.answers.is_empty();
+        let has_soa_authority = hop_result.message.authority.iter().any(|rr| rr.rtype == RecordType::SOA);
 
         hops.push(TraceHop {
             server: used_server,
-            result: r,
+            result: hop_result,
         });
 
         if has_answers || has_soa_authority {

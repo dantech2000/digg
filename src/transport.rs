@@ -88,13 +88,13 @@ fn send_udp(
         .send_to(query, addr)
         .map_err(|e| DnsError::Network(format!("failed to send UDP query to {}: {}", addr, e)))?;
 
-    let mut buf = vec![0u8; udp_payload_size];
+    let mut resp_buf = vec![0u8; udp_payload_size];
     let (size, _) = socket
-        .recv_from(&mut buf)
+        .recv_from(&mut resp_buf)
         .map_err(|e| DnsError::Network(format!("failed to receive UDP response: {}", e)))?;
 
     let elapsed = start.elapsed();
-    let message = DnsMessage::parse(&buf[..size])?;
+    let message = DnsMessage::parse(&resp_buf[..size])?;
 
     Ok(QueryResult {
         message,
@@ -154,7 +154,7 @@ fn send_tcp(
 
 /// Send a TCP query on an already-connected stream and return the raw response bytes.
 /// Used by AXFR which needs to read multiple messages from one connection.
-pub fn tcp_send_raw(
+pub fn send_tcp_raw(
     stream: &mut TcpStream,
     query: &[u8],
 ) -> Result<(), DnsError> {
@@ -165,16 +165,16 @@ pub fn tcp_send_raw(
 }
 
 /// Read one DNS message from a TCP stream (2-byte length prefix + message).
-pub fn tcp_read_message(stream: &mut TcpStream) -> Result<(DnsMessage, usize), DnsError> {
+pub fn read_tcp_message(stream: &mut TcpStream) -> Result<(DnsMessage, usize), DnsError> {
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf)?;
-    let msg_len = u16::from_be_bytes(len_buf) as usize;
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
 
-    let mut msg_buf = vec![0u8; msg_len];
-    stream.read_exact(&mut msg_buf)?;
+    let mut resp_buf = vec![0u8; resp_len];
+    stream.read_exact(&mut resp_buf)?;
 
-    let message = DnsMessage::parse(&msg_buf)?;
-    Ok((message, msg_len))
+    let message = DnsMessage::parse(&resp_buf)?;
+    Ok((message, resp_len))
 }
 
 pub fn verify_id(response: &Header, expected_id: u16) -> Result<(), DnsError> {

@@ -4,8 +4,8 @@ use crate::transport::{QueryResult, TransportProtocol};
 use std::io::Read;
 use std::time::{Duration, Instant};
 
-pub fn resolve_doh_url(spec: &str) -> String {
-    match spec.to_lowercase().as_str() {
+pub fn resolve_doh_url(provider_or_url: &str) -> String {
+    match provider_or_url.to_lowercase().as_str() {
         "" | "cloudflare" => "https://1.1.1.1/dns-query".to_string(),
         "google" => "https://dns.google/dns-query".to_string(),
         "quad9" => "https://dns.quad9.net:5053/dns-query".to_string(),
@@ -28,15 +28,15 @@ pub fn send_doh_query(
         .send_bytes(query)
         .map_err(|e| DnsError::Network(format!("DoH request to {} failed: {}", url, e)))?;
 
-    let mut body = Vec::new();
+    let mut resp_buf = Vec::new();
     response
         .into_reader()
-        .read_to_end(&mut body)
+        .read_to_end(&mut resp_buf)
         .map_err(|e| DnsError::Network(format!("failed to read DoH response: {}", e)))?;
 
     let elapsed = start.elapsed();
-    let bytes = body.len();
-    let message = DnsMessage::parse(&body)?;
+    let bytes = resp_buf.len();
+    let message = DnsMessage::parse(&resp_buf)?;
 
     Ok(QueryResult {
         message,

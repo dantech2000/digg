@@ -89,8 +89,8 @@ pub fn run_watch(
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
+fn format_duration(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
     let secs = total_secs % 60;

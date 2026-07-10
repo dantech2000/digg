@@ -82,7 +82,7 @@ impl RecordType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_name(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "A" => Some(RecordType::A),
             "AAAA" => Some(RecordType::AAAA),
