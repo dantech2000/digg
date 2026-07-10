@@ -2,6 +2,8 @@
 
 A modern DNS lookup CLI tool written in Rust. Like `dig`, but with built-in support for DNS-over-TLS, DNS-over-HTTPS, DNSSEC, tracing, benchmarking, and more.
 
+See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
+
 ## Install
 
 ```sh
