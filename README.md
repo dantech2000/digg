@@ -27,6 +27,11 @@ personal access token with **Contents: Read and write** access limited to
 save it as the `HOMEBREW_TAP_TOKEN` Actions secret in this repository. The tag
 must use the `vX.Y.Z` form and match the version in `Cargo.toml`.
 
+After the initial release, Release Please derives semantic version bumps from
+conventional commits (`fix:` for a patch, `feat:` for a minor, and `!` for a
+breaking change). It maintains a release PR that updates `Cargo.toml` and
+`CHANGELOG.md`; merging that PR creates the tag and starts the release workflow.
+
 ## Usage
 
 ```
