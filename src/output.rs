@@ -6,6 +6,7 @@ use crate::protocol::types::Rcode;
 use crate::trace::TraceHop;
 use crate::transport::QueryResult;
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // ANSI color codes
 const RESET: &str = "\x1b[0m";
@@ -22,6 +23,46 @@ const BOLD_WHITE: &str = "\x1b[1;37m";
 const BOLD_GREEN: &str = "\x1b[1;32m";
 const BOLD_YELLOW: &str = "\x1b[1;33m";
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+static COLOR_MODE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_color_mode(mode: ColorMode) {
+    let value = match mode {
+        ColorMode::Auto => 0,
+        ColorMode::Always => 1,
+        ColorMode::Never => 2,
+    };
+    COLOR_MODE.store(value, Ordering::Relaxed);
+}
+
+pub fn stdout_color_enabled() -> bool {
+    let mode = match COLOR_MODE.load(Ordering::Relaxed) {
+        1 => ColorMode::Always,
+        2 => ColorMode::Never,
+        _ => ColorMode::Auto,
+    };
+    color_enabled(
+        mode,
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
+    )
+}
+
+fn color_enabled(mode: ColorMode, is_terminal: bool, no_color: bool) -> bool {
+    match mode {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => is_terminal && !no_color,
+    }
+}
+
 struct Painter {
     color: bool,
 }
@@ -29,7 +70,7 @@ struct Painter {
 impl Painter {
     fn new() -> Self {
         Painter {
-            color: io::stdout().is_terminal(),
+            color: stdout_color_enabled(),
         }
     }
 
@@ -39,6 +80,20 @@ impl Painter {
         } else {
             text.to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{color_enabled, ColorMode};
+
+    #[test]
+    fn color_mode_precedence_is_explicit_then_no_color_then_terminal() {
+        assert!(color_enabled(ColorMode::Always, false, true));
+        assert!(!color_enabled(ColorMode::Never, true, false));
+        assert!(!color_enabled(ColorMode::Auto, true, true));
+        assert!(color_enabled(ColorMode::Auto, true, false));
+        assert!(!color_enabled(ColorMode::Auto, false, false));
     }
 }
 
