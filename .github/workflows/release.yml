@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-15-intel
             asset_suffix: darwin_amd64
           - runner: macos-14
             asset_suffix: darwin_arm64
