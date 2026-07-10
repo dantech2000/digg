@@ -1,0 +1,108 @@
+use crate::error::DnsError;
+use crate::protocol::edns::{self, EdnsInfo, EdnsOptions};
+use crate::protocol::header::Header;
+use crate::protocol::question::Question;
+use crate::protocol::record::ResourceRecord;
+use crate::protocol::types::RecordType;
+use rand::Rng;
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+pub struct DnsMessage {
+    pub header: Header,
+    pub questions: Vec<Question>,
+    pub answers: Vec<ResourceRecord>,
+    pub authority: Vec<ResourceRecord>,
+    pub additional: Vec<ResourceRecord>,
+    pub edns: Option<EdnsInfo>,
+}
+
+impl DnsMessage {
+    pub fn build_query(
+        name: &str,
+        qtype: RecordType,
+        rd: bool,
+        edns_opts: Option<&EdnsOptions>,
+    ) -> Result<(Vec<u8>, u16), DnsError> {
+        let mut rng = rand::thread_rng();
+        let id: u16 = rng.gen();
+        let mut header = Header::new_query(id, rd);
+
+        if edns_opts.is_some() {
+            header.arcount = 1;
+        }
+
+        let question = Question::new(name, qtype);
+
+        let mut buf = header.encode();
+        buf.extend(question.encode()?);
+
+        if let Some(opts) = edns_opts {
+            buf.extend(edns::encode_opt_record(opts));
+        }
+
+        Ok((buf, id))
+    }
+
+    pub fn parse(buf: &[u8]) -> Result<Self, DnsError> {
+        let header = Header::decode(buf)?;
+        let mut offset = 12;
+
+        let mut questions = Vec::new();
+        for _ in 0..header.qdcount {
+            let (q, consumed) = Question::decode(buf, offset)?;
+            questions.push(q);
+            offset += consumed;
+        }
+
+        let mut answers = Vec::new();
+        for _ in 0..header.ancount {
+            let (rr, consumed) = ResourceRecord::decode(buf, offset)?;
+            answers.push(rr);
+            offset += consumed;
+        }
+
+        let mut authority = Vec::new();
+        for _ in 0..header.nscount {
+            let (rr, consumed) = ResourceRecord::decode(buf, offset)?;
+            authority.push(rr);
+            offset += consumed;
+        }
+
+        let mut additional = Vec::new();
+        let mut edns_info: Option<EdnsInfo> = None;
+        for _ in 0..header.arcount {
+            // Peek at the record type before fully decoding
+            let (_, name_len) = crate::protocol::name::decode_name(buf, offset)?;
+            let type_pos = offset + name_len;
+            if type_pos + 10 <= buf.len() {
+                let rtype_val = u16::from_be_bytes([buf[type_pos], buf[type_pos + 1]]);
+                if rtype_val == 41 {
+                    // OPT pseudo-record: parse EDNS info from CLASS and TTL fields
+                    let class_val = u16::from_be_bytes([buf[type_pos + 2], buf[type_pos + 3]]);
+                    let ttl_val = u32::from_be_bytes([
+                        buf[type_pos + 4], buf[type_pos + 5],
+                        buf[type_pos + 6], buf[type_pos + 7],
+                    ]);
+                    edns_info = Some(edns::parse_opt_record(class_val, ttl_val));
+                }
+            }
+
+            let (rr, consumed) = ResourceRecord::decode(buf, offset)?;
+            // Don't add OPT records to the additional section display
+            if rr.rtype != RecordType::OPT {
+                additional.push(rr);
+            }
+            offset += consumed;
+        }
+
+        Ok(DnsMessage {
+            header,
+            questions,
+            answers,
+            authority,
+            additional,
+            edns: edns_info,
+        })
+    }
+}
