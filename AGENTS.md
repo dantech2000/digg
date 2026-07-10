@@ -17,9 +17,9 @@ cargo clippy
 cargo run -- example.com A
 ```
 
-There is no test suite yet (`cargo test` finds nothing). Verify changes by running
-`digg` against real queries (e.g. `cargo run -- example.com`, `+trace`, `+json`, etc.)
-rather than assuming correctness from compilation alone.
+There is no test suite yet (`cargo test` finds nothing; tracked in #9). Verify
+changes by running `digg` against real queries (e.g. `cargo run -- example.com`,
+`+trace`, `+json`, etc.) rather than assuming correctness from compilation alone.
 
 ## Architecture
 
@@ -54,3 +54,39 @@ rather than assuming correctness from compilation alone.
 
 - Do **not** add the Claude Code co-authoring trailer (or any AI co-authoring
   trailer/footer) to commits, PRs, or release notes in this repo.
+
+## GitHub workflow
+
+- File an issue before starting non-trivial work; reference it in the commit
+  message and PR body (`Fixes #N`). Commit/PR titles use conventional-commit
+  prefixes matching the issue title (`fix:`, `feat:`, `chore:`, `docs:`,
+  `refactor:`, `test:`, `ci:`).
+- Labels: GitHub's defaults (`bug`, `enhancement`, `documentation`, ...) plus
+  two repo-specific additions — `ci` (build/release tooling, GitHub Actions)
+  and `chore` (maintenance / dev-experience work with no user-facing behavior
+  change). Reuse existing labels; only add a new one if nothing fits.
+- No CI is configured yet (tracked in #5), so "all good" before merging means
+  a clean local `cargo build --release`, `cargo test --release`, and a
+  manual smoke test of whatever code paths the change touches — see the
+  commits for #1/#3 for the level of manual verification expected.
+- PRs are squash-merged with the branch deleted (`gh pr merge --squash
+  --delete-branch`).
+- Use the `/backlog` skill (`.claude/skills/backlog/`) to run a backlog
+  grooming session and turn accepted ideas into properly-structured issues.
+
+## GitHub wiki
+
+- Docs live at https://github.com/dantech2000/digg/wiki (git-backed, not
+  built from this repo).
+- Bootstrap gotcha: `digg.wiki.git` isn't clonable until a page has been
+  created at least once via the web UI (Wiki tab → "Create the first
+  page") — there's no API to initialize it. If `git clone
+  git@github.com:dantech2000/digg.wiki.git` fails with "Repository not
+  found" on a brand-new wiki, that's why.
+
+## Working in this workspace (Conductor)
+
+- This directory is a git worktree; `main` may already be checked out in a
+  sibling worktree, so `git checkout main` will fail with "already used by
+  worktree". Start new work with `git checkout -b <branch> origin/main`
+  instead.
