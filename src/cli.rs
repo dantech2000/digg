@@ -135,8 +135,8 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
             continue;
         }
 
-        if arg.starts_with('@') {
-            opts.servers.push(arg[1..].to_string());
+        if let Some(server) = arg.strip_prefix('@') {
+            opts.servers.push(server.to_string());
             i += 1;
             continue;
         }

@@ -4,7 +4,11 @@ use std::collections::HashSet;
 /// Encode a domain name into DNS wire format (uncompressed).
 pub fn encode_name(name: &str) -> Result<Vec<u8>, DnsError> {
     let mut buf = Vec::new();
-    let name = if name == "." { "" } else { name.trim_end_matches('.') };
+    let name = if name == "." {
+        ""
+    } else {
+        name.trim_end_matches('.')
+    };
 
     if name.is_empty() {
         buf.push(0);
@@ -70,7 +74,9 @@ pub fn decode_name(buf: &[u8], offset: usize) -> Result<(String, usize), DnsErro
             }
 
             if !visited.insert(ptr) {
-                return Err(DnsError::Protocol("compression pointer loop detected".into()));
+                return Err(DnsError::Protocol(
+                    "compression pointer loop detected".into(),
+                ));
             }
 
             pos = ptr;

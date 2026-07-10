@@ -17,6 +17,7 @@ pub struct BenchResult {
     pub histogram: Vec<(f64, usize)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_benchmark(
     server: &str,
     port: u16,

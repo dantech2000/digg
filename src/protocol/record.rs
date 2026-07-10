@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+#[allow(clippy::upper_case_acronyms)] // DNS record type names are standardized uppercase acronyms.
 #[derive(Debug, Clone, Serialize)]
 pub enum RData {
     A(Ipv4Addr),
@@ -13,7 +14,10 @@ pub enum RData {
     NS(String),
     CNAME(String),
     PTR(String),
-    MX { preference: u16, exchange: String },
+    MX {
+        preference: u16,
+        exchange: String,
+    },
     TXT(Vec<String>),
     SOA {
         mname: String,
@@ -105,7 +109,11 @@ fn hex(data: &[u8]) -> String {
 }
 
 fn format_type_bitmaps(types: &[RecordType]) -> String {
-    types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
+    types
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl fmt::Display for RData {
@@ -116,44 +124,148 @@ impl fmt::Display for RData {
             RData::NS(name) => write!(f, "{}", name),
             RData::CNAME(name) => write!(f, "{}", name),
             RData::PTR(name) => write!(f, "{}", name),
-            RData::MX { preference, exchange } => write!(f, "{} {}", preference, exchange),
+            RData::MX {
+                preference,
+                exchange,
+            } => write!(f, "{} {}", preference, exchange),
             RData::TXT(strings) => {
                 let joined: Vec<String> = strings.iter().map(|s| format!("\"{}\"", s)).collect();
                 write!(f, "{}", joined.join(" "))
             }
-            RData::SOA { mname, rname, serial, refresh, retry, expire, minimum } => {
-                write!(f, "{} {} {} {} {} {} {}", mname, rname, serial, refresh, retry, expire, minimum)
+            RData::SOA {
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            } => {
+                write!(
+                    f,
+                    "{} {} {} {} {} {} {}",
+                    mname, rname, serial, refresh, retry, expire, minimum
+                )
             }
-            RData::SRV { priority, weight, port, target } => {
+            RData::SRV {
+                priority,
+                weight,
+                port,
+                target,
+            } => {
                 write!(f, "{} {} {} {}", priority, weight, port, target)
             }
             RData::CAA { flags, tag, value } => {
                 write!(f, "{} {} \"{}\"", flags, tag, value)
             }
-            RData::DS { key_tag, algorithm, digest_type, digest } => {
-                write!(f, "{} {} {} {}", key_tag, algorithm, digest_type, hex(digest))
+            RData::DS {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            } => {
+                write!(
+                    f,
+                    "{} {} {} {}",
+                    key_tag,
+                    algorithm,
+                    digest_type,
+                    hex(digest)
+                )
             }
-            RData::RRSIG { type_covered, algorithm, labels, original_ttl, expiration, inception, key_tag, signer, signature } => {
-                write!(f, "{} {} {} {} {} {} {} {} {}",
-                    type_covered, algorithm, labels, original_ttl,
-                    expiration, inception, key_tag, signer, base64_encode(signature))
+            RData::RRSIG {
+                type_covered,
+                algorithm,
+                labels,
+                original_ttl,
+                expiration,
+                inception,
+                key_tag,
+                signer,
+                signature,
+            } => {
+                write!(
+                    f,
+                    "{} {} {} {} {} {} {} {} {}",
+                    type_covered,
+                    algorithm,
+                    labels,
+                    original_ttl,
+                    expiration,
+                    inception,
+                    key_tag,
+                    signer,
+                    base64_encode(signature)
+                )
             }
-            RData::DNSKEY { flags, protocol, algorithm, public_key } => {
-                write!(f, "{} {} {} {}", flags, protocol, algorithm, base64_encode(public_key))
+            RData::DNSKEY {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            } => {
+                write!(
+                    f,
+                    "{} {} {} {}",
+                    flags,
+                    protocol,
+                    algorithm,
+                    base64_encode(public_key)
+                )
             }
-            RData::NSEC { next_domain, type_bitmaps } => {
+            RData::NSEC {
+                next_domain,
+                type_bitmaps,
+            } => {
                 write!(f, "{} {}", next_domain, format_type_bitmaps(type_bitmaps))
             }
-            RData::NSEC3 { algorithm, flags, iterations, salt, next_hashed, type_bitmaps } => {
-                let salt_str = if salt.is_empty() { "-".to_string() } else { hex(salt) };
-                write!(f, "{} {} {} {} {} {}", algorithm, flags, iterations, salt_str,
-                    base32_encode_hex(next_hashed), format_type_bitmaps(type_bitmaps))
+            RData::NSEC3 {
+                algorithm,
+                flags,
+                iterations,
+                salt,
+                next_hashed,
+                type_bitmaps,
+            } => {
+                let salt_str = if salt.is_empty() {
+                    "-".to_string()
+                } else {
+                    hex(salt)
+                };
+                write!(
+                    f,
+                    "{} {} {} {} {} {}",
+                    algorithm,
+                    flags,
+                    iterations,
+                    salt_str,
+                    base32_encode_hex(next_hashed),
+                    format_type_bitmaps(type_bitmaps)
+                )
             }
-            RData::NSEC3PARAM { algorithm, flags, iterations, salt } => {
-                let salt_str = if salt.is_empty() { "-".to_string() } else { hex(salt) };
+            RData::NSEC3PARAM {
+                algorithm,
+                flags,
+                iterations,
+                salt,
+            } => {
+                let salt_str = if salt.is_empty() {
+                    "-".to_string()
+                } else {
+                    hex(salt)
+                };
                 write!(f, "{} {} {} {}", algorithm, flags, iterations, salt_str)
             }
-            RData::SVCB { priority, target, params } | RData::HTTPS { priority, target, params } => {
+            RData::SVCB {
+                priority,
+                target,
+                params,
+            }
+            | RData::HTTPS {
+                priority,
+                target,
+                params,
+            } => {
                 write!(f, "{} {}", priority, target)?;
                 let formatted = format_svc_params(params);
                 if !formatted.is_empty() {
@@ -192,8 +304,13 @@ impl RData {
     pub fn is_name(&self) -> bool {
         matches!(
             self,
-            RData::NS(_) | RData::CNAME(_) | RData::PTR(_) | RData::MX { .. } | RData::SRV { .. }
-            | RData::SVCB { .. } | RData::HTTPS { .. }
+            RData::NS(_)
+                | RData::CNAME(_)
+                | RData::PTR(_)
+                | RData::MX { .. }
+                | RData::SRV { .. }
+                | RData::SVCB { .. }
+                | RData::HTTPS { .. }
         )
     }
 
@@ -204,8 +321,12 @@ impl RData {
     pub fn is_dnssec(&self) -> bool {
         matches!(
             self,
-            RData::RRSIG { .. } | RData::DNSKEY { .. } | RData::DS { .. }
-            | RData::NSEC { .. } | RData::NSEC3 { .. } | RData::NSEC3PARAM { .. }
+            RData::RRSIG { .. }
+                | RData::DNSKEY { .. }
+                | RData::DS { .. }
+                | RData::NSEC { .. }
+                | RData::NSEC3 { .. }
+                | RData::NSEC3PARAM { .. }
         )
     }
 }
@@ -266,7 +387,10 @@ fn parse_rdata(
                 return Err(DnsError::Protocol("invalid A record length".into()));
             }
             Ok(RData::A(Ipv4Addr::new(
-                buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
             )))
         }
         RecordType::AAAA => {
@@ -295,7 +419,10 @@ fn parse_rdata(
             }
             let preference = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
             let (exchange, _) = decode_name(buf, offset + 2)?;
-            Ok(RData::MX { preference, exchange })
+            Ok(RData::MX {
+                preference,
+                exchange,
+            })
         }
         RecordType::TXT => {
             let mut strings = Vec::new();
@@ -323,12 +450,45 @@ fn parse_rdata(
             if soa_offset + 20 > buf.len() {
                 return Err(DnsError::Protocol("truncated SOA record".into()));
             }
-            let serial = u32::from_be_bytes([buf[soa_offset], buf[soa_offset + 1], buf[soa_offset + 2], buf[soa_offset + 3]]);
-            let refresh = u32::from_be_bytes([buf[soa_offset + 4], buf[soa_offset + 5], buf[soa_offset + 6], buf[soa_offset + 7]]);
-            let retry = u32::from_be_bytes([buf[soa_offset + 8], buf[soa_offset + 9], buf[soa_offset + 10], buf[soa_offset + 11]]);
-            let expire = u32::from_be_bytes([buf[soa_offset + 12], buf[soa_offset + 13], buf[soa_offset + 14], buf[soa_offset + 15]]);
-            let minimum = u32::from_be_bytes([buf[soa_offset + 16], buf[soa_offset + 17], buf[soa_offset + 18], buf[soa_offset + 19]]);
-            Ok(RData::SOA { mname, rname, serial, refresh, retry, expire, minimum })
+            let serial = u32::from_be_bytes([
+                buf[soa_offset],
+                buf[soa_offset + 1],
+                buf[soa_offset + 2],
+                buf[soa_offset + 3],
+            ]);
+            let refresh = u32::from_be_bytes([
+                buf[soa_offset + 4],
+                buf[soa_offset + 5],
+                buf[soa_offset + 6],
+                buf[soa_offset + 7],
+            ]);
+            let retry = u32::from_be_bytes([
+                buf[soa_offset + 8],
+                buf[soa_offset + 9],
+                buf[soa_offset + 10],
+                buf[soa_offset + 11],
+            ]);
+            let expire = u32::from_be_bytes([
+                buf[soa_offset + 12],
+                buf[soa_offset + 13],
+                buf[soa_offset + 14],
+                buf[soa_offset + 15],
+            ]);
+            let minimum = u32::from_be_bytes([
+                buf[soa_offset + 16],
+                buf[soa_offset + 17],
+                buf[soa_offset + 18],
+                buf[soa_offset + 19],
+            ]);
+            Ok(RData::SOA {
+                mname,
+                rname,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            })
         }
         RecordType::SRV => {
             if rdlength < 7 {
@@ -338,7 +498,12 @@ fn parse_rdata(
             let weight = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
             let port = u16::from_be_bytes([buf[offset + 4], buf[offset + 5]]);
             let (target, _) = decode_name(buf, offset + 6)?;
-            Ok(RData::SRV { priority, weight, port, target })
+            Ok(RData::SRV {
+                priority,
+                weight,
+                port,
+                target,
+            })
         }
         RecordType::CAA => {
             if rdlength < 2 {
@@ -350,7 +515,8 @@ fn parse_rdata(
                 return Err(DnsError::Protocol("CAA tag extends beyond RDATA".into()));
             }
             let tag = String::from_utf8_lossy(&buf[offset + 2..offset + 2 + tag_len]).to_string();
-            let value = String::from_utf8_lossy(&buf[offset + 2 + tag_len..offset + rdlength]).to_string();
+            let value =
+                String::from_utf8_lossy(&buf[offset + 2 + tag_len..offset + rdlength]).to_string();
             Ok(RData::CAA { flags, tag, value })
         }
         RecordType::DS => {
@@ -361,18 +527,39 @@ fn parse_rdata(
             let algorithm = buf[offset + 2];
             let digest_type = buf[offset + 3];
             let digest = buf[offset + 4..offset + rdlength].to_vec();
-            Ok(RData::DS { key_tag, algorithm, digest_type, digest })
+            Ok(RData::DS {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            })
         }
         RecordType::RRSIG => {
             if rdlength < 18 {
                 return Err(DnsError::Protocol("invalid RRSIG record length".into()));
             }
-            let type_covered = RecordType::from_u16(u16::from_be_bytes([buf[offset], buf[offset + 1]]));
+            let type_covered =
+                RecordType::from_u16(u16::from_be_bytes([buf[offset], buf[offset + 1]]));
             let algorithm = buf[offset + 2];
             let labels = buf[offset + 3];
-            let original_ttl = u32::from_be_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
-            let expiration = u32::from_be_bytes([buf[offset + 8], buf[offset + 9], buf[offset + 10], buf[offset + 11]]);
-            let inception = u32::from_be_bytes([buf[offset + 12], buf[offset + 13], buf[offset + 14], buf[offset + 15]]);
+            let original_ttl = u32::from_be_bytes([
+                buf[offset + 4],
+                buf[offset + 5],
+                buf[offset + 6],
+                buf[offset + 7],
+            ]);
+            let expiration = u32::from_be_bytes([
+                buf[offset + 8],
+                buf[offset + 9],
+                buf[offset + 10],
+                buf[offset + 11],
+            ]);
+            let inception = u32::from_be_bytes([
+                buf[offset + 12],
+                buf[offset + 13],
+                buf[offset + 14],
+                buf[offset + 15],
+            ]);
             let key_tag = u16::from_be_bytes([buf[offset + 16], buf[offset + 17]]);
             let (signer, signer_len) = decode_name(buf, offset + 18)?;
             let sig_start = offset + 18 + signer_len;
@@ -382,7 +569,17 @@ fn parse_rdata(
             } else {
                 Vec::new()
             };
-            Ok(RData::RRSIG { type_covered, algorithm, labels, original_ttl, expiration, inception, key_tag, signer, signature })
+            Ok(RData::RRSIG {
+                type_covered,
+                algorithm,
+                labels,
+                original_ttl,
+                expiration,
+                inception,
+                key_tag,
+                signer,
+                signature,
+            })
         }
         RecordType::DNSKEY => {
             if rdlength < 4 {
@@ -392,14 +589,22 @@ fn parse_rdata(
             let protocol = buf[offset + 2];
             let algorithm = buf[offset + 3];
             let public_key = buf[offset + 4..offset + rdlength].to_vec();
-            Ok(RData::DNSKEY { flags, protocol, algorithm, public_key })
+            Ok(RData::DNSKEY {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            })
         }
         RecordType::NSEC => {
             let (next_domain, name_len) = decode_name(buf, offset)?;
             let bitmap_start = offset + name_len;
             let bitmap_len = rdlength.saturating_sub(name_len);
             let type_bitmaps = parse_type_bitmaps(buf, bitmap_start, bitmap_len);
-            Ok(RData::NSEC { next_domain, type_bitmaps })
+            Ok(RData::NSEC {
+                next_domain,
+                type_bitmaps,
+            })
         }
         RecordType::NSEC3 => {
             if rdlength < 6 {
@@ -419,33 +624,51 @@ fn parse_rdata(
             let bitmap_start = hash_offset + 1 + hash_len;
             let bitmap_len = (offset + rdlength).saturating_sub(bitmap_start);
             let type_bitmaps = parse_type_bitmaps(buf, bitmap_start, bitmap_len);
-            Ok(RData::NSEC3 { algorithm, flags, iterations, salt, next_hashed, type_bitmaps })
+            Ok(RData::NSEC3 {
+                algorithm,
+                flags,
+                iterations,
+                salt,
+                next_hashed,
+                type_bitmaps,
+            })
         }
         RecordType::NSEC3PARAM => {
             if rdlength < 5 {
-                return Err(DnsError::Protocol("invalid NSEC3PARAM record length".into()));
+                return Err(DnsError::Protocol(
+                    "invalid NSEC3PARAM record length".into(),
+                ));
             }
             let algorithm = buf[offset];
             let flags = buf[offset + 1];
             let iterations = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
             let salt_len = buf[offset + 4] as usize;
             let salt = buf[offset + 5..offset + 5 + salt_len].to_vec();
-            Ok(RData::NSEC3PARAM { algorithm, flags, iterations, salt })
+            Ok(RData::NSEC3PARAM {
+                algorithm,
+                flags,
+                iterations,
+                salt,
+            })
         }
         RecordType::SVCB => {
             let (priority, target, params) = parse_svcb_rdata(buf, offset, rdlength)?;
-            Ok(RData::SVCB { priority, target, params })
+            Ok(RData::SVCB {
+                priority,
+                target,
+                params,
+            })
         }
         RecordType::HTTPS => {
             let (priority, target, params) = parse_svcb_rdata(buf, offset, rdlength)?;
-            Ok(RData::HTTPS { priority, target, params })
+            Ok(RData::HTTPS {
+                priority,
+                target,
+                params,
+            })
         }
-        RecordType::OPT => {
-            Ok(RData::OPT(buf[offset..offset + rdlength].to_vec()))
-        }
-        _ => {
-            Ok(RData::Unknown(buf[offset..offset + rdlength].to_vec()))
-        }
+        RecordType::OPT => Ok(RData::OPT(buf[offset..offset + rdlength].to_vec())),
+        _ => Ok(RData::Unknown(buf[offset..offset + rdlength].to_vec())),
     }
 }
 
@@ -455,7 +678,9 @@ fn parse_svcb_rdata(
     rdlength: usize,
 ) -> Result<(u16, String, Vec<SvcParam>), DnsError> {
     if rdlength < 3 {
-        return Err(DnsError::Protocol("invalid SVCB/HTTPS record length".into()));
+        return Err(DnsError::Protocol(
+            "invalid SVCB/HTTPS record length".into(),
+        ));
     }
     let priority = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
     let (target, name_len) = decode_name(buf, offset + 2)?;
@@ -467,7 +692,9 @@ fn parse_svcb_rdata(
         let value_len = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
         pos += 4;
         if pos + value_len > end {
-            return Err(DnsError::Protocol("SvcParam value extends beyond RDATA".into()));
+            return Err(DnsError::Protocol(
+                "SvcParam value extends beyond RDATA".into(),
+            ));
         }
         let value = buf[pos..pos + value_len].to_vec();
         params.push(SvcParam { key, value });
@@ -479,7 +706,7 @@ fn parse_svcb_rdata(
 fn format_svc_params(params: &[SvcParam]) -> String {
     params
         .iter()
-        .map(|p| format_svc_param(p))
+        .map(format_svc_param)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -521,7 +748,7 @@ fn format_svc_param(param: &SvcParam) -> String {
                 let port = u16::from_be_bytes([param.value[0], param.value[1]]);
                 format!("port={}", port)
             } else {
-                format!("port=<invalid>")
+                "port=<invalid>".to_string()
             }
         }
         4 => {

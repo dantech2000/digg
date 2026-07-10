@@ -5,14 +5,14 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct Header {
     pub id: u16,
-    pub qr: bool,       // false = query, true = response
-    pub opcode: u8,      // 4 bits
-    pub aa: bool,        // authoritative answer
-    pub tc: bool,        // truncated
-    pub rd: bool,        // recursion desired
-    pub ra: bool,        // recursion available
-    pub ad: bool,        // authenticated data (DNSSEC)
-    pub cd: bool,        // checking disabled (DNSSEC)
+    pub qr: bool,   // false = query, true = response
+    pub opcode: u8, // 4 bits
+    pub aa: bool,   // authoritative answer
+    pub tc: bool,   // truncated
+    pub rd: bool,   // recursion desired
+    pub ra: bool,   // recursion available
+    pub ad: bool,   // authenticated data (DNSSEC)
+    pub cd: bool,   // checking disabled (DNSSEC)
     pub rcode: Rcode,
     pub qdcount: u16,
     pub ancount: u16,

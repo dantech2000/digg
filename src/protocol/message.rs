@@ -81,8 +81,10 @@ impl DnsMessage {
                     // OPT pseudo-record: parse EDNS info from CLASS and TTL fields
                     let class_val = u16::from_be_bytes([buf[type_pos + 2], buf[type_pos + 3]]);
                     let ttl_val = u32::from_be_bytes([
-                        buf[type_pos + 4], buf[type_pos + 5],
-                        buf[type_pos + 6], buf[type_pos + 7],
+                        buf[type_pos + 4],
+                        buf[type_pos + 5],
+                        buf[type_pos + 6],
+                        buf[type_pos + 7],
                     ]);
                     edns_info = Some(edns::decode_opt_record(class_val, ttl_val));
                 }

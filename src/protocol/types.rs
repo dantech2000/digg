@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::fmt;
 
+#[allow(clippy::upper_case_acronyms)] // DNS record type names are standardized uppercase acronyms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RecordType {
     A,

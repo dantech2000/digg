@@ -48,7 +48,11 @@ fn parse_batch_line(line: &str) -> BatchQuery {
             name = part.to_string();
         }
     }
-    BatchQuery { name, qtype, server }
+    BatchQuery {
+        name,
+        qtype,
+        server,
+    }
 }
 
 pub fn run_batch(
