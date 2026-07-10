@@ -163,42 +163,62 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         return Ok(opts);
     }
 
-    // Parse positional args into query pairs
-    // Support both: "name type" and "type1 name1 type2 name2"
+    opts.queries = resolve_queries_from_positionals(&positionals)?;
+
+    // If no queries found, use defaults
+    if opts.queries.is_empty() {
+        opts.queries.push((opts.qtype, opts.name.clone()));
+    }
+
+    // Set primary name/qtype from first query for backward compat
+    if let Some((qtype, name)) = opts.queries.first() {
+        opts.qtype = *qtype;
+        opts.name = name.clone();
+    }
+
+    // Detect AXFR
+    if opts.qtype == RecordType::AXFR {
+        opts.axfr = true;
+    }
+
+    Ok(opts)
+}
+
+// Support both: "name type" and "type1 name1 type2 name2"
+fn resolve_queries_from_positionals(
+    positionals: &[String],
+) -> Result<Vec<(RecordType, String)>, DnsError> {
     let mut has_explicit_type = false;
     let mut pending_type: Option<RecordType> = None;
     let mut names_found = Vec::new();
     let mut types_found = Vec::new();
+    let mut queries: Vec<(RecordType, String)> = Vec::new();
 
-    for pos in &positionals {
-        if let Some(rtype) = RecordType::from_str(pos) {
+    for pos in positionals {
+        if let Some(rtype) = RecordType::parse_name(pos) {
             has_explicit_type = true;
-            if let Some(pt) = pending_type.take() {
+            if let Some(pending_type) = pending_type.take() {
                 // Two types in a row: the first one gets paired with whatever name comes next
-                types_found.push(pt);
+                types_found.push(pending_type);
             }
             pending_type = Some(rtype);
+        } else if let Some(pending_type) = pending_type.take() {
+            // Type followed by name -> pair them
+            queries.push((pending_type, pos.clone()));
         } else {
-            if let Some(pt) = pending_type.take() {
-                // Type followed by name -> pair them
-                opts.queries.push((pt, pos.clone()));
-            } else {
-                names_found.push(pos.clone());
-            }
+            names_found.push(pos.clone());
         }
     }
 
     // Handle remaining pending type
-    if let Some(pt) = pending_type {
+    if let Some(pending_type) = pending_type {
         if !names_found.is_empty() {
             // Pair with first unpaired name
             let name = names_found.remove(0);
-            opts.queries.push((pt, name));
-        } else if opts.queries.is_empty() {
-            // Type alone: query root or the default name
-            types_found.push(pt);
+            queries.push((pending_type, name));
         } else {
-            types_found.push(pt);
+            // Type alone: query root or the default name
+            types_found.push(pending_type);
         }
     }
 
@@ -210,39 +230,23 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
                 || name.parse::<std::net::Ipv6Addr>().is_ok())
         {
             let rev = reverse_name(name)?;
-            opts.queries.push((RecordType::PTR, rev));
+            queries.push((RecordType::PTR, rev));
         } else {
-            opts.queries.push((RecordType::A, name.clone()));
+            queries.push((RecordType::A, name.clone()));
         }
     }
 
     // Handle remaining unpaired types (apply to first name or root)
     for rtype in &types_found {
-        if let Some(first_query) = opts.queries.first() {
+        if let Some(first_query) = queries.first() {
             let name = first_query.1.clone();
-            opts.queries.push((*rtype, name));
+            queries.push((*rtype, name));
         } else {
-            opts.queries.push((*rtype, ".".to_string()));
+            queries.push((*rtype, ".".to_string()));
         }
     }
 
-    // If no queries found, use defaults
-    if opts.queries.is_empty() {
-        opts.queries.push((opts.qtype, opts.name.clone()));
-    }
-
-    // Set primary name/qtype from first query for backward compat
-    if let Some((qt, n)) = opts.queries.first() {
-        opts.qtype = *qt;
-        opts.name = n.clone();
-    }
-
-    // Detect AXFR
-    if opts.qtype == RecordType::AXFR {
-        opts.axfr = true;
-    }
-
-    Ok(opts)
+    Ok(queries)
 }
 
 fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
@@ -268,29 +272,29 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+watch" => opts.watch = Some(2),
         "+doh" => opts.doh = Some(String::new()),
         s if s.starts_with("+timeout=") => {
-            let val = &s[9..];
-            opts.timeout = val
+            let timeout_str = &s[9..];
+            opts.timeout = timeout_str
                 .parse::<u64>()
-                .map_err(|_| DnsError::Usage(format!("invalid timeout: {}", val)))?;
+                .map_err(|_| DnsError::Usage(format!("invalid timeout: {}", timeout_str)))?;
             if opts.timeout == 0 {
                 return Err(DnsError::Usage("timeout must be > 0".into()));
             }
         }
         s if s.starts_with("+bench=") => {
-            let val = &s[7..];
-            let n = val
+            let bench_str = &s[7..];
+            let n = bench_str
                 .parse::<usize>()
-                .map_err(|_| DnsError::Usage(format!("invalid bench count: {}", val)))?;
+                .map_err(|_| DnsError::Usage(format!("invalid bench count: {}", bench_str)))?;
             if n == 0 {
                 return Err(DnsError::Usage("bench count must be > 0".into()));
             }
             opts.bench = Some(n);
         }
         s if s.starts_with("+watch=") => {
-            let val = &s[7..];
-            let n = val
+            let watch_str = &s[7..];
+            let n = watch_str
                 .parse::<u64>()
-                .map_err(|_| DnsError::Usage(format!("invalid watch interval: {}", val)))?;
+                .map_err(|_| DnsError::Usage(format!("invalid watch interval: {}", watch_str)))?;
             if n == 0 {
                 return Err(DnsError::Usage("watch interval must be > 0".into()));
             }

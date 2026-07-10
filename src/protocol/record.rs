@@ -96,7 +96,7 @@ pub struct SvcParam {
     pub value: Vec<u8>,
 }
 
-fn b64(data: &[u8]) -> String {
+fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
@@ -104,7 +104,7 @@ fn hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
-fn type_list_str(types: &[RecordType]) -> String {
+fn format_type_bitmaps(types: &[RecordType]) -> String {
     types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
 }
 
@@ -136,18 +136,18 @@ impl fmt::Display for RData {
             RData::RRSIG { type_covered, algorithm, labels, original_ttl, expiration, inception, key_tag, signer, signature } => {
                 write!(f, "{} {} {} {} {} {} {} {} {}",
                     type_covered, algorithm, labels, original_ttl,
-                    expiration, inception, key_tag, signer, b64(signature))
+                    expiration, inception, key_tag, signer, base64_encode(signature))
             }
             RData::DNSKEY { flags, protocol, algorithm, public_key } => {
-                write!(f, "{} {} {} {}", flags, protocol, algorithm, b64(public_key))
+                write!(f, "{} {} {} {}", flags, protocol, algorithm, base64_encode(public_key))
             }
             RData::NSEC { next_domain, type_bitmaps } => {
-                write!(f, "{} {}", next_domain, type_list_str(type_bitmaps))
+                write!(f, "{} {}", next_domain, format_type_bitmaps(type_bitmaps))
             }
             RData::NSEC3 { algorithm, flags, iterations, salt, next_hashed, type_bitmaps } => {
                 let salt_str = if salt.is_empty() { "-".to_string() } else { hex(salt) };
                 write!(f, "{} {} {} {} {} {}", algorithm, flags, iterations, salt_str,
-                    base32_encode_hex(next_hashed), type_list_str(type_bitmaps))
+                    base32_encode_hex(next_hashed), format_type_bitmaps(type_bitmaps))
             }
             RData::NSEC3PARAM { algorithm, flags, iterations, salt } => {
                 let salt_str = if salt.is_empty() { "-".to_string() } else { hex(salt) };
@@ -542,7 +542,7 @@ fn format_svc_param(param: &SvcParam) -> String {
         }
         5 => {
             // ech: base64
-            format!("ech=\"{}\"", b64(&param.value))
+            format!("ech=\"{}\"", base64_encode(&param.value))
         }
         6 => {
             // ipv6hint: concatenated 16-byte IPv6 addrs

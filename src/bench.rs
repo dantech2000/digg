@@ -40,13 +40,13 @@ pub fn run_benchmark(
             eprint!("\r  benchmarking... {}/{}", i + 1, count);
         }
 
-        let query_result = (|| -> Result<f64, DnsError> {
+        let latency_result = (|| -> Result<f64, DnsError> {
             let (query, _id) = DnsMessage::build_query(name, qtype, true, Some(&edns))?;
             let r = transport::send_query(server, port, &query, force_tcp, timeout, 4096)?;
             Ok(r.elapsed.as_secs_f64() * 1000.0)
         })();
 
-        match query_result {
+        match latency_result {
             Ok(ms) => latencies.push(ms),
             Err(_) => failed += 1,
         }

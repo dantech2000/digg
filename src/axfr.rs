@@ -26,13 +26,13 @@ pub fn perform_axfr(
         .map_err(|e| DnsError::Network(format!("failed to set AXFR timeout: {}", e)))?;
 
     // Send query
-    transport::tcp_send_raw(&mut stream, &query)?;
+    transport::send_tcp_raw(&mut stream, &query)?;
 
     let mut all_records: Vec<ResourceRecord> = Vec::new();
     let mut soa_count = 0;
 
     loop {
-        let (message, _msg_len) = transport::tcp_read_message(&mut stream)?;
+        let (message, _msg_len) = transport::read_tcp_message(&mut stream)?;
 
         if message.header.rcode != Rcode::NoError {
             return Err(DnsError::Protocol(format!(

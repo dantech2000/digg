@@ -40,9 +40,9 @@ fn parse_batch_line(line: &str) -> BatchQuery {
     let mut server = None;
 
     for part in parts {
-        if let Some(s) = part.strip_prefix('@') {
-            server = Some(s.to_string());
-        } else if let Some(rt) = RecordType::from_str(part) {
+        if let Some(addr) = part.strip_prefix('@') {
+            server = Some(addr.to_string());
+        } else if let Some(rt) = RecordType::parse_name(part) {
             qtype = rt;
         } else {
             name = part.to_string();

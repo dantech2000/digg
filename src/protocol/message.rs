@@ -84,7 +84,7 @@ impl DnsMessage {
                         buf[type_pos + 4], buf[type_pos + 5],
                         buf[type_pos + 6], buf[type_pos + 7],
                     ]);
-                    edns_info = Some(edns::parse_opt_record(class_val, ttl_val));
+                    edns_info = Some(edns::decode_opt_record(class_val, ttl_val));
                 }
             }
 
