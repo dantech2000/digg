@@ -38,5 +38,13 @@ cask "digg" do
   end
 
   binary "digg"
+
+  # The release binary is not Developer ID-signed. Match the other CLI casks
+  # in this tap by clearing the download quarantine after Homebrew stages it.
+  postflight do
+    if OS.mac?
+      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/digg"]
+    end
+  end
 end
 EOF
