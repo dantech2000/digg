@@ -64,10 +64,19 @@ jobs:
           }
           test -f release-assets/digg_${GITHUB_REF_NAME#v}_darwin_amd64.tar.gz
           test -f release-assets/digg_${GITHUB_REF_NAME#v}_darwin_arm64.tar.gz
-      - name: Create GitHub Release
+      - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes
+        run: |
+          # release-please creates the GitHub Release when its release PR is
+          # merged, so this tag-triggered job must upload assets to the existing
+          # release rather than trying to create a duplicate. Fall back to
+          # creating the release for tags pushed without release-please.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes
+          fi
       - name: Update Homebrew Cask
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
