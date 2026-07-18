@@ -15,9 +15,7 @@ pub fn perform_axfr(
     let (query, _query_id) = DnsMessage::build_query(name, RecordType::AXFR, false, None)?;
 
     let addr = format!("{}:{}", server, port);
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| DnsError::Network(format!("invalid address '{}': {}", addr, e)))?;
+    let socket_addr = transport::resolve_socket_addr(&addr)?;
 
     let mut stream = TcpStream::connect_timeout(&socket_addr, timeout)
         .map_err(|e| DnsError::Network(format!("AXFR TCP connect to {} failed: {}", addr, e)))?;

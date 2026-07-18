@@ -93,8 +93,15 @@ pub fn run_batch(
                 })
                 .collect();
 
-            for h in handles {
-                results.push(h.join().unwrap());
+            for (q, h) in chunk.iter().zip(handles) {
+                match h.join() {
+                    Ok(r) => results.push(r),
+                    Err(_) => results.push((
+                        q.name.clone(),
+                        q.qtype,
+                        Err(DnsError::Network("worker thread panicked".into())),
+                    )),
+                }
             }
         });
     }
