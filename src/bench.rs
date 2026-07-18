@@ -43,7 +43,7 @@ pub fn run_benchmark(
 
         let latency_result = (|| -> Result<f64, DnsError> {
             let (query, _id) = DnsMessage::build_query(name, qtype, true, Some(&edns))?;
-            let r = transport::send_query(server, port, &query, force_tcp, timeout, 4096)?;
+            let r = transport::send_query(server, port, &query, force_tcp, timeout)?;
             Ok(r.elapsed.as_secs_f64() * 1000.0)
         })();
 

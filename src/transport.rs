@@ -57,7 +57,6 @@ pub fn send_query(
     query: &[u8],
     force_tcp: bool,
     timeout: Duration,
-    udp_payload_size: usize,
 ) -> Result<QueryResult, DnsError> {
     let addr = format_addr(server, port);
     let start = Instant::now();
@@ -66,7 +65,7 @@ pub fn send_query(
         return send_tcp(&addr, query, start, timeout);
     }
 
-    let result = send_udp(&addr, query, start, timeout, udp_payload_size)?;
+    let result = send_udp(&addr, query, start, timeout)?;
 
     if result.message.header.tc {
         let start = Instant::now();
@@ -76,12 +75,15 @@ pub fn send_query(
     Ok(result)
 }
 
+// A UDP DNS datagram can be as large as the IP payload allows; size the receive
+// buffer to hold any of them so a large response is never silently truncated.
+const UDP_RECV_BUF: usize = 65535;
+
 fn send_udp(
     addr: &str,
     query: &[u8],
     start: Instant,
     timeout: Duration,
-    udp_payload_size: usize,
 ) -> Result<QueryResult, DnsError> {
     let socket_addr = resolve_socket_addr(addr)?;
     let bind_addr = if socket_addr.is_ipv6() {
@@ -94,14 +96,19 @@ fn send_udp(
     socket
         .set_read_timeout(Some(timeout))
         .map_err(|e| DnsError::Network(format!("failed to set timeout: {}", e)))?;
+    // Connect so the kernel only delivers datagrams from the queried server,
+    // dropping stray/spoofed packets from other sources.
+    socket.connect(socket_addr).map_err(|e| {
+        DnsError::Network(format!("failed to connect UDP socket to {}: {}", addr, e))
+    })?;
 
     socket
-        .send_to(query, socket_addr)
+        .send(query)
         .map_err(|e| DnsError::Network(format!("failed to send UDP query to {}: {}", addr, e)))?;
 
-    let mut resp_buf = vec![0u8; udp_payload_size];
-    let (size, _) = socket
-        .recv_from(&mut resp_buf)
+    let mut resp_buf = vec![0u8; UDP_RECV_BUF];
+    let size = socket
+        .recv(&mut resp_buf)
         .map_err(|e| DnsError::Network(format!("failed to receive UDP response: {}", e)))?;
 
     let elapsed = start.elapsed();

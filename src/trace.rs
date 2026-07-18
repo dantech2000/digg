@@ -47,7 +47,7 @@ pub fn perform_trace(
         for server in &current_servers {
             let query_result = (|| -> Result<QueryResult, DnsError> {
                 let (query, query_id) = DnsMessage::build_query(name, qtype, false, Some(&edns))?;
-                let r = transport::send_query(server, 53, &query, false, timeout, 4096)?;
+                let r = transport::send_query(server, 53, &query, false, timeout)?;
                 transport::verify_id(&r.message.header, query_id)?;
                 Ok(r)
             })();
@@ -143,7 +143,7 @@ fn resolve_ns_address(ns_name: &str, timeout: Duration) -> Result<Vec<String>, D
 
     for qtype in [RecordType::A, RecordType::AAAA] {
         let (query, _id) = DnsMessage::build_query(ns_name, qtype, true, None)?;
-        let result = transport::send_query(&system_ns, 53, &query, false, timeout, 4096)?;
+        let result = transport::send_query(&system_ns, 53, &query, false, timeout)?;
         for rr in &result.message.answers {
             match &rr.rdata {
                 RData::A(addr) => addrs.push(addr.to_string()),
