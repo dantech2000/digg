@@ -4,8 +4,17 @@ use crate::protocol::message::DnsMessage;
 use serde::Serialize;
 use std::fmt;
 use std::io::{Read, Write};
-use std::net::{TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
+
+/// Resolve a "host:port" string to a socket address, accepting either an IP
+/// literal or a hostname (unlike `SocketAddr::parse`, which only takes IPs).
+pub fn resolve_socket_addr(addr: &str) -> Result<SocketAddr, DnsError> {
+    addr.to_socket_addrs()
+        .map_err(|e| DnsError::Network(format!("failed to resolve '{}': {}", addr, e)))?
+        .next()
+        .ok_or_else(|| DnsError::Network(format!("no addresses found for '{}'", addr)))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TransportProtocol {
@@ -74,9 +83,7 @@ fn send_udp(
     timeout: Duration,
     udp_payload_size: usize,
 ) -> Result<QueryResult, DnsError> {
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| DnsError::Network(format!("invalid address '{}': {}", addr, e)))?;
+    let socket_addr = resolve_socket_addr(addr)?;
     let bind_addr = if socket_addr.is_ipv6() {
         "[::]:0"
     } else {
@@ -89,7 +96,7 @@ fn send_udp(
         .map_err(|e| DnsError::Network(format!("failed to set timeout: {}", e)))?;
 
     socket
-        .send_to(query, addr)
+        .send_to(query, socket_addr)
         .map_err(|e| DnsError::Network(format!("failed to send UDP query to {}: {}", addr, e)))?;
 
     let mut resp_buf = vec![0u8; udp_payload_size];
@@ -114,13 +121,9 @@ fn send_tcp(
     start: Instant,
     timeout: Duration,
 ) -> Result<QueryResult, DnsError> {
-    let mut stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|e| DnsError::Network(format!("invalid address '{}': {}", addr, e)))?,
-        timeout,
-    )
-    .map_err(|e| DnsError::Network(format!("failed to connect TCP to {}: {}", addr, e)))?;
+    let socket_addr = resolve_socket_addr(addr)?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, timeout)
+        .map_err(|e| DnsError::Network(format!("failed to connect TCP to {}: {}", addr, e)))?;
 
     stream
         .set_read_timeout(Some(timeout))

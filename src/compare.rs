@@ -49,8 +49,14 @@ pub fn compare_servers(
             })
             .collect();
 
-        for h in handles {
-            results.push(h.join().unwrap());
+        for (server, h) in servers.iter().zip(handles) {
+            match h.join() {
+                Ok(r) => results.push(r),
+                Err(_) => results.push(ComparisonResult {
+                    server: server.clone(),
+                    result: Err(DnsError::Network("worker thread panicked".into())),
+                }),
+            }
         }
     });
 

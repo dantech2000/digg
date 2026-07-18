@@ -202,6 +202,70 @@ mod tests {
         ));
     }
 
+    // Wrap RDATA in a full resource record (root owner name) for decoding.
+    fn rr_with_rdata(rtype: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8]; // owner: root
+        buf.extend_from_slice(&rtype.to_be_bytes());
+        buf.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        buf.extend_from_slice(&0u32.to_be_bytes()); // TTL
+        buf.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        buf.extend_from_slice(rdata);
+        buf
+    }
+
+    #[test]
+    fn nsec3_oversized_lengths_error_instead_of_panicking() {
+        // salt_len = 255 but only 1 byte of RDATA follows it.
+        let buf = rr_with_rdata(50, &[1, 0, 0, 0, 255, 0]);
+        assert!(matches!(
+            ResourceRecord::decode(&buf, 0),
+            Err(DnsError::Protocol(_))
+        ));
+
+        // Valid salt (len 0) but hash_len = 255 with no bytes behind it.
+        let buf = rr_with_rdata(50, &[1, 0, 0, 0, 0, 255]);
+        assert!(matches!(
+            ResourceRecord::decode(&buf, 0),
+            Err(DnsError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn ds_record_displays_uppercase_zero_padded_hex_digest() {
+        // key_tag=0x0102 alg=8 digest_type=2 digest=[0x0a, 0xff, 0x00]
+        let rdata = [0x01, 0x02, 8, 2, 0x0A, 0xFF, 0x00];
+        let buf = rr_with_rdata(43, &rdata);
+        let (record, _) = ResourceRecord::decode(&buf, 0).unwrap();
+        assert_eq!(record.rdata.to_string(), "258 8 2 0AFF00");
+    }
+
+    #[test]
+    fn nsec3param_oversized_salt_errors_instead_of_panicking() {
+        let buf = rr_with_rdata(51, &[1, 0, 0, 0, 255]);
+        assert!(matches!(
+            ResourceRecord::decode(&buf, 0),
+            Err(DnsError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn nsec3_valid_record_still_decodes() {
+        // alg=1 flags=0 iter=0 salt_len=2 salt=AABB hash_len=4 hash=01020304
+        // bitmap: window 0, len 1, 0x40 (bit for type A = 1)
+        let rdata = [1, 0, 0, 0, 2, 0xAA, 0xBB, 4, 1, 2, 3, 4, 0, 1, 0x40];
+        let buf = rr_with_rdata(50, &rdata);
+        let (record, _) = ResourceRecord::decode(&buf, 0).unwrap();
+        match record.rdata {
+            RData::NSEC3 {
+                salt, next_hashed, ..
+            } => {
+                assert_eq!(salt, vec![0xAA, 0xBB]);
+                assert_eq!(next_hashed, vec![1, 2, 3, 4]);
+            }
+            other => panic!("expected NSEC3, got {:?}", other),
+        }
+    }
+
     #[test]
     fn dns_messages_parse_answers_and_extract_edns() {
         let response = [

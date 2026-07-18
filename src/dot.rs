@@ -36,9 +36,7 @@ pub fn send_dot_query(
     timeout: Duration,
 ) -> Result<QueryResult, DnsError> {
     let addr = format!("{}:853", server);
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| DnsError::Network(format!("invalid DoT address '{}': {}", addr, e)))?;
+    let socket_addr = crate::transport::resolve_socket_addr(&addr)?;
 
     let tcp_stream = TcpStream::connect_timeout(&socket_addr, timeout)
         .map_err(|e| DnsError::Network(format!("DoT TCP connect failed: {}", e)))?;

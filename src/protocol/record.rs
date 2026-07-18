@@ -105,7 +105,13 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 fn hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02X}", b)).collect()
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = String::with_capacity(data.len() * 2);
+    for &b in data {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    s
 }
 
 fn format_type_bitmaps(types: &[RecordType]) -> String {
@@ -610,18 +616,27 @@ fn parse_rdata(
             if rdlength < 6 {
                 return Err(DnsError::Protocol("invalid NSEC3 record length".into()));
             }
+            let rdata_end = offset + rdlength;
             let algorithm = buf[offset];
             let flags = buf[offset + 1];
             let iterations = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
             let salt_len = buf[offset + 4] as usize;
-            let salt = buf[offset + 5..offset + 5 + salt_len].to_vec();
-            let hash_offset = offset + 5 + salt_len;
-            if hash_offset >= offset + rdlength {
+            let salt_end = offset + 5 + salt_len;
+            if salt_end > rdata_end {
+                return Err(DnsError::Protocol("NSEC3 salt exceeds RDATA".into()));
+            }
+            let salt = buf[offset + 5..salt_end].to_vec();
+            let hash_offset = salt_end;
+            if hash_offset >= rdata_end {
                 return Err(DnsError::Protocol("truncated NSEC3".into()));
             }
             let hash_len = buf[hash_offset] as usize;
-            let next_hashed = buf[hash_offset + 1..hash_offset + 1 + hash_len].to_vec();
-            let bitmap_start = hash_offset + 1 + hash_len;
+            let hash_end = hash_offset + 1 + hash_len;
+            if hash_end > rdata_end {
+                return Err(DnsError::Protocol("NSEC3 hash exceeds RDATA".into()));
+            }
+            let next_hashed = buf[hash_offset + 1..hash_end].to_vec();
+            let bitmap_start = hash_end;
             let bitmap_len = (offset + rdlength).saturating_sub(bitmap_start);
             let type_bitmaps = parse_type_bitmaps(buf, bitmap_start, bitmap_len);
             Ok(RData::NSEC3 {
@@ -643,7 +658,11 @@ fn parse_rdata(
             let flags = buf[offset + 1];
             let iterations = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
             let salt_len = buf[offset + 4] as usize;
-            let salt = buf[offset + 5..offset + 5 + salt_len].to_vec();
+            let salt_end = offset + 5 + salt_len;
+            if salt_end > offset + rdlength {
+                return Err(DnsError::Protocol("NSEC3PARAM salt exceeds RDATA".into()));
+            }
+            let salt = buf[offset + 5..salt_end].to_vec();
             Ok(RData::NSEC3PARAM {
                 algorithm,
                 flags,

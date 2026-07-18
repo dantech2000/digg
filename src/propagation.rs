@@ -95,8 +95,15 @@ pub fn check_propagation(
             })
             .collect();
 
-        for h in handles {
-            results.push(h.join().unwrap());
+        for (resolver, h) in PUBLIC_RESOLVERS.iter().zip(handles) {
+            match h.join() {
+                Ok(r) => results.push(r),
+                Err(_) => results.push(PropagationResult {
+                    resolver_name: resolver.name,
+                    resolver_ip: resolver.ip,
+                    result: Err(DnsError::Network("worker thread panicked".into())),
+                }),
+            }
         }
     });
 
