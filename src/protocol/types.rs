@@ -178,20 +178,44 @@ pub enum Rcode {
     NxDomain,
     NotImp,
     Refused,
-    Unknown(u8),
+    BadVers,
+    Unknown(u16),
 }
 
 #[allow(dead_code)]
 impl Rcode {
+    /// Decode the 4-bit RCODE from the message header.
     pub fn from_u8(val: u8) -> Self {
-        match val & 0x0F {
+        Self::from_u16((val & 0x0F) as u16)
+    }
+
+    /// Decode a full RCODE value, which may be up to 12 bits once the upper 8
+    /// bits from an EDNS OPT record are folded in (RFC 6891). RCODE 16 is
+    /// BADVERS/BADSIG.
+    pub fn from_u16(val: u16) -> Self {
+        match val {
             0 => Rcode::NoError,
             1 => Rcode::FormErr,
             2 => Rcode::ServFail,
             3 => Rcode::NxDomain,
             4 => Rcode::NotImp,
             5 => Rcode::Refused,
+            16 => Rcode::BadVers,
             n => Rcode::Unknown(n),
+        }
+    }
+
+    /// The numeric RCODE value.
+    pub fn code(self) -> u16 {
+        match self {
+            Rcode::NoError => 0,
+            Rcode::FormErr => 1,
+            Rcode::ServFail => 2,
+            Rcode::NxDomain => 3,
+            Rcode::NotImp => 4,
+            Rcode::Refused => 5,
+            Rcode::BadVers => 16,
+            Rcode::Unknown(n) => n,
         }
     }
 
@@ -209,6 +233,7 @@ impl fmt::Display for Rcode {
             Rcode::NxDomain => write!(f, "NXDOMAIN"),
             Rcode::NotImp => write!(f, "NOTIMP"),
             Rcode::Refused => write!(f, "REFUSED"),
+            Rcode::BadVers => write!(f, "BADVERS"),
             Rcode::Unknown(n) => write!(f, "RCODE{}", n),
         }
     }

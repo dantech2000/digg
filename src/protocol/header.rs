@@ -70,15 +70,9 @@ impl Header {
         if self.cd {
             flags2 |= 0x10;
         }
-        match self.rcode {
-            Rcode::NoError => {}
-            Rcode::FormErr => flags2 |= 1,
-            Rcode::ServFail => flags2 |= 2,
-            Rcode::NxDomain => flags2 |= 3,
-            Rcode::NotImp => flags2 |= 4,
-            Rcode::Refused => flags2 |= 5,
-            Rcode::Unknown(n) => flags2 |= n & 0x0F,
-        }
+        // Only the low 4 bits live in the header; any extended RCODE bits
+        // belong in the EDNS OPT record, which the header does not own.
+        flags2 |= (self.rcode.code() & 0x0F) as u8;
         buf.push(flags2);
 
         buf.extend_from_slice(&self.qdcount.to_be_bytes());

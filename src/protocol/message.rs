@@ -45,7 +45,7 @@ impl DnsMessage {
     }
 
     pub fn parse(buf: &[u8]) -> Result<Self, DnsError> {
-        let header = Header::decode(buf)?;
+        let mut header = Header::decode(buf)?;
         let mut offset = 12;
 
         let mut questions = Vec::new();
@@ -96,6 +96,16 @@ impl DnsMessage {
                 additional.push(rr);
             }
             offset += consumed;
+        }
+
+        // RFC 6891: the OPT record carries the upper 8 bits of a 12-bit RCODE.
+        // Fold them into the header's 4-bit value so extended codes such as
+        // BADVERS (16) are reported correctly instead of as their low nibble.
+        if let Some(ref edns) = edns_info {
+            if edns.extended_rcode != 0 {
+                let full = ((edns.extended_rcode as u16) << 4) | (header.rcode.code() & 0x0F);
+                header.rcode = crate::protocol::types::Rcode::from_u16(full);
+            }
         }
 
         Ok(DnsMessage {
