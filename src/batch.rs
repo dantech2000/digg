@@ -82,9 +82,8 @@ pub fn run_batch(
                         let result = (|| -> Result<QueryResult, DnsError> {
                             let (query, query_id) =
                                 DnsMessage::build_query(&q.name, q.qtype, true, Some(edns))?;
-                            let r = transport::send_query(
-                                server, port, &query, force_tcp, timeout, 4096,
-                            )?;
+                            let r =
+                                transport::send_query(server, port, &query, force_tcp, timeout)?;
                             transport::verify_id(&r.message.header, query_id)?;
                             Ok(r)
                         })();

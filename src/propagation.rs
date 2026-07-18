@@ -81,8 +81,7 @@ pub fn check_propagation(
                     let result = (|| -> Result<QueryResult, DnsError> {
                         let (query, query_id) =
                             DnsMessage::build_query(name, qtype, true, Some(edns))?;
-                        let r =
-                            transport::send_query(resolver.ip, 53, &query, false, timeout, 4096)?;
+                        let r = transport::send_query(resolver.ip, 53, &query, false, timeout)?;
                         transport::verify_id(&r.message.header, query_id)?;
                         Ok(r)
                     })();

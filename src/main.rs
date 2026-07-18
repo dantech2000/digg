@@ -49,7 +49,6 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
     } else {
         None
     };
-    let udp_size = if opts.edns { 4096 } else { 512 };
 
     // Resolve server
     let resolve_server = || -> Result<String, DnsError> {
@@ -176,7 +175,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             doh::send_doh_query(url, &query, timeout)?
         } else {
             let force_tcp = opts.tcp.unwrap_or(false);
-            transport::send_query(&server, opts.port, &query, force_tcp, timeout, udp_size)?
+            transport::send_query(&server, opts.port, &query, force_tcp, timeout)?
         };
 
         transport::verify_id(&result.message.header, query_id)?;
