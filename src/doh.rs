@@ -8,6 +8,9 @@ pub fn resolve_doh_url(provider_or_url: &str) -> String {
     match provider_or_url.to_lowercase().as_str() {
         "" | "cloudflare" => "https://1.1.1.1/dns-query".to_string(),
         "google" => "https://dns.google/dns-query".to_string(),
+        // Quad9's :443 endpoint requires HTTP/2 (it returns 505 to HTTP/1.1
+        // requests); ureq 2.x only speaks HTTP/1.1, so use the :5053 endpoint,
+        // which accepts HTTP/1.1. Revisit if the HTTP client gains HTTP/2.
         "quad9" => "https://dns.quad9.net:5053/dns-query".to_string(),
         url if url.starts_with("https://") => url.to_string(),
         other => format!("https://{}/dns-query", other),
