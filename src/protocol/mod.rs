@@ -267,6 +267,36 @@ mod tests {
     }
 
     #[test]
+    fn extended_rcode_from_opt_record_is_folded_into_header() {
+        // Header: qr set, RCODE low nibble 0, arcount = 1.
+        // OPT: root name, TYPE 41, CLASS 1232, TTL with extended-RCODE byte = 1
+        // (so full RCODE = (1 << 4) | 0 = 16 = BADVERS), RDLENGTH 0.
+        let msg = [
+            0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // header
+            0x00, 0x00, 0x29, 0x04, 0xD0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, // OPT
+        ];
+        let message = DnsMessage::parse(&msg).unwrap();
+        let edns = message.edns.expect("OPT record should be parsed");
+        assert_eq!(edns.extended_rcode, 1);
+        assert_eq!(message.header.rcode, Rcode::BadVers);
+        assert_eq!(message.header.rcode.to_string(), "BADVERS");
+    }
+
+    #[test]
+    fn rcode_numeric_round_trips_including_extended() {
+        for (code, rcode) in [
+            (0u16, Rcode::NoError),
+            (3, Rcode::NxDomain),
+            (5, Rcode::Refused),
+            (16, Rcode::BadVers),
+            (23, Rcode::Unknown(23)),
+        ] {
+            assert_eq!(Rcode::from_u16(code), rcode);
+            assert_eq!(rcode.code(), code);
+        }
+    }
+
+    #[test]
     fn dns_messages_parse_answers_and_extract_edns() {
         let response = [
             0xbe, 0xef, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',

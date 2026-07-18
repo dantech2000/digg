@@ -109,8 +109,10 @@ pub fn perform_trace(
         for ns_name in &ns_names {
             for rr in &last.result.message.additional {
                 if rr.name == *ns_name {
-                    if let RData::A(addr) = &rr.rdata {
-                        next_servers.push(addr.to_string());
+                    match &rr.rdata {
+                        RData::A(addr) => next_servers.push(addr.to_string()),
+                        RData::AAAA(addr) => next_servers.push(addr.to_string()),
+                        _ => {}
                     }
                 }
             }
@@ -137,14 +139,23 @@ pub fn perform_trace(
 
 fn resolve_ns_address(ns_name: &str, timeout: Duration) -> Result<Vec<String>, DnsError> {
     let system_ns = resolver::system_nameserver()?;
-    let (query, _id) = DnsMessage::build_query(ns_name, RecordType::A, true, None)?;
-    let result = transport::send_query(&system_ns, 53, &query, false, timeout, 4096)?;
-
     let mut addrs = Vec::new();
-    for rr in &result.message.answers {
-        if let RData::A(addr) = &rr.rdata {
-            addrs.push(addr.to_string());
+
+    for qtype in [RecordType::A, RecordType::AAAA] {
+        let (query, _id) = DnsMessage::build_query(ns_name, qtype, true, None)?;
+        let result = transport::send_query(&system_ns, 53, &query, false, timeout, 4096)?;
+        for rr in &result.message.answers {
+            match &rr.rdata {
+                RData::A(addr) => addrs.push(addr.to_string()),
+                RData::AAAA(addr) => addrs.push(addr.to_string()),
+                _ => {}
+            }
+        }
+        // Prefer IPv4 when available; only fall through to AAAA if we found none.
+        if !addrs.is_empty() {
+            break;
         }
     }
+
     Ok(addrs)
 }
