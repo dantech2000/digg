@@ -54,7 +54,7 @@ pub fn run_benchmark(
     }
     eprintln!("\r  benchmarking... {}/{} done", count, count);
 
-    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    latencies.sort_by(|a, b| a.total_cmp(b));
 
     let successful = latencies.len();
     let min_ms = latencies.first().copied().unwrap_or(0.0);

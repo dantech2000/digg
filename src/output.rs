@@ -187,16 +187,20 @@ pub fn print_full(
 
 pub fn print_json(result: &QueryResult) {
     let output = JsonOutput::from_result(result);
-    let json = serde_json::to_string_pretty(&output).expect("JSON serialization failed");
-    println!("{}", json);
+    match serde_json::to_string_pretty(&output) {
+        Ok(json) => println!("{}", json),
+        Err(e) => eprint_error(&format!("JSON serialization failed: {}", e)),
+    }
 }
 
 // === YAML output ===
 
 pub fn print_yaml(result: &QueryResult) {
     let output = JsonOutput::from_result(result);
-    let yaml = serde_yaml::to_string(&output).expect("YAML serialization failed");
-    print!("{}", yaml);
+    match serde_yaml::to_string(&output) {
+        Ok(yaml) => print!("{}", yaml),
+        Err(e) => eprint_error(&format!("YAML serialization failed: {}", e)),
+    }
 }
 
 #[derive(serde::Serialize)]
