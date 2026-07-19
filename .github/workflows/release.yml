@@ -31,7 +31,9 @@ jobs:
           cargo build --release --locked
           mkdir -p dist
           archive="digg_${version}_${{ matrix.asset_suffix }}.tar.gz"
-          tar -C target/release -czf "dist/$archive" digg
+          mkdir -p stage
+          cp target/release/digg docs/digg.1 stage/
+          tar -C stage -czf "dist/$archive" digg digg.1
           shasum -a 256 "dist/$archive" > "dist/$archive.sha256"
       - uses: actions/upload-artifact@v7
         with:
