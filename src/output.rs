@@ -63,7 +63,7 @@ fn color_enabled(mode: ColorMode, is_terminal: bool, no_color: bool) -> bool {
     }
 }
 
-struct Painter {
+pub struct Painter {
     color: bool,
 }
 
@@ -72,6 +72,13 @@ impl Painter {
         Painter {
             color: stdout_color_enabled(),
         }
+    }
+
+    /// Painter with an explicit color decision, independent of terminal
+    /// detection. This is the seam tests use to render deterministically.
+    #[allow(dead_code)] // only test code constructs this today
+    pub fn with_color(color: bool) -> Self {
+        Painter { color }
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -85,7 +92,14 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::{color_enabled, ColorMode};
+    use super::*;
+    use crate::protocol::header::Header;
+    use crate::protocol::message::DnsMessage;
+    use crate::protocol::record::{RData, ResourceRecord};
+    use crate::protocol::types::{RecordClass, RecordType};
+    use crate::transport::TransportProtocol;
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     #[test]
     fn color_mode_precedence_is_explicit_then_no_color_then_terminal() {
@@ -95,6 +109,206 @@ mod tests {
         assert!(color_enabled(ColorMode::Auto, true, false));
         assert!(!color_enabled(ColorMode::Auto, false, false));
     }
+
+    #[test]
+    fn painter_with_color_wraps_ansi_codes_and_without_passes_through() {
+        let plain = Painter::with_color(false);
+        assert_eq!(plain.paint(GREEN, "x"), "x");
+        let colored = Painter::with_color(true);
+        assert_eq!(colored.paint(GREEN, "x"), "\x1b[32mx\x1b[0m");
+    }
+
+    fn a_record(name: &str, ttl: u32, addr: [u8; 4]) -> ResourceRecord {
+        ResourceRecord {
+            name: name.to_string(),
+            rtype: RecordType::A,
+            rclass: RecordClass::IN,
+            ttl,
+            rdata: RData::A(Ipv4Addr::from(addr)),
+        }
+    }
+
+    fn fixture_result(answers: Vec<ResourceRecord>) -> QueryResult {
+        let mut header = Header::new_query(0x1234, true);
+        header.qr = true;
+        header.ancount = answers.len() as u16;
+        QueryResult {
+            message: DnsMessage {
+                header,
+                questions: vec![],
+                answers,
+                authority: vec![],
+                additional: vec![],
+                edns: None,
+            },
+            elapsed: Duration::from_millis(23),
+            bytes: 56,
+            protocol: TransportProtocol::Udp,
+        }
+    }
+
+    fn render<F: FnOnce(&mut Vec<u8>)>(f: F) -> String {
+        let mut buf = Vec::new();
+        f(&mut buf);
+        String::from_utf8(buf).expect("output is valid UTF-8")
+    }
+
+    // === Golden tests (color off) ===
+
+    #[test]
+    fn write_short_emits_one_rdata_per_line() {
+        let result = fixture_result(vec![
+            a_record("example.com.", 3600, [93, 184, 216, 34]),
+            a_record("example.com.", 3600, [93, 184, 216, 35]),
+        ]);
+        let text = render(|out| write_short(out, &result));
+        assert_eq!(text, "93.184.216.34\n93.184.216.35\n");
+    }
+
+    #[test]
+    fn write_full_golden_single_answer() {
+        let result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "8.8.8.8", 53, true, true));
+        let expected = "\n ANSWER\n \
+             TYPE   NAME           TTL   VALUE\n \
+             A      example.com.   1h    93.184.216.34\n\
+             \n \u{2500}\u{2500} 8.8.8.8:53 (UDP) \u{2500}\u{2500} NOERROR \u{2500}\u{2500} 23ms \u{2500}\u{2500} 56B \u{2500}\u{2500}\n";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn write_full_contains_no_ansi_escapes_when_color_off() {
+        let result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "1.1.1.1", 53, true, true));
+        assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn write_full_hides_sections_when_toggled_off() {
+        let mut result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        result
+            .message
+            .authority
+            .push(a_record("ns.example.com.", 60, [5, 6, 7, 8]));
+        result
+            .message
+            .additional
+            .push(a_record("glue.example.com.", 60, [9, 9, 9, 9]));
+
+        let painter = Painter::with_color(false);
+        let shown = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        assert!(shown.contains("AUTHORITY") && shown.contains("ADDITIONAL"));
+
+        let hidden = render(|out| write_full(out, &painter, &result, "s", 53, false, false));
+        assert!(!hidden.contains("AUTHORITY") && !hidden.contains("ADDITIONAL"));
+    }
+
+    #[test]
+    fn write_full_renders_edns_and_dnssec_flag_lines() {
+        let mut result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        result.message.edns = Some(crate::protocol::edns::EdnsInfo {
+            udp_payload_size: 1232,
+            extended_rcode: 0,
+            version: 0,
+            dnssec_ok: true,
+        });
+        result.message.header.ad = true;
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        assert!(text.contains(" EDNS version 0; flags: do; udp: 1232"));
+        assert!(text.contains(" flags: ad"));
+    }
+
+    #[test]
+    fn write_batch_result_golden_success_and_error() {
+        let result = fixture_result(vec![a_record("example.com.", 60, [93, 184, 216, 34])]);
+        let painter = Painter::with_color(false);
+        let ok = render(|out| {
+            write_batch_result(out, &painter, "example.com", &RecordType::A, &Ok(result))
+        });
+        assert_eq!(ok, " A example.com NOERROR 23ms 93.184.216.34\n");
+
+        let err: Result<QueryResult, crate::error::DnsError> =
+            Err(crate::error::DnsError::Network("timed out".into()));
+        let failed =
+            render(|out| write_batch_result(out, &painter, "example.com", &RecordType::A, &err));
+        assert_eq!(failed, " A example.com error: timed out\n");
+    }
+
+    #[test]
+    fn write_json_is_valid_and_carries_timing_and_answers() {
+        let result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
+        let text = render(|out| write_json(out, &result));
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(value["query_time_ms"], 23);
+        assert_eq!(value["response_size"], 56);
+        assert_eq!(value["transport"], "UDP");
+        assert_eq!(value["message"]["answers"][0]["ttl"], 3600);
+    }
+
+    #[test]
+    fn write_yaml_is_valid_and_matches_json_shape() {
+        let result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
+        let text = render(|out| write_yaml(out, &result));
+        let value: serde_yaml::Value = serde_yaml::from_str(&text).expect("valid YAML");
+        assert_eq!(value["transport"], "UDP");
+        assert_eq!(value["query_time_ms"], 23);
+    }
+
+    #[test]
+    fn write_bench_reports_stats_and_histogram() {
+        let bench = BenchResult {
+            successful: 3,
+            failed: 1,
+            min_ms: 1.0,
+            max_ms: 9.0,
+            avg_ms: 4.0,
+            p50_ms: 2.0,
+            p90_ms: 8.0,
+            p99_ms: 9.0,
+            histogram: vec![(5.0, 2), (9.0, 1)],
+        };
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_bench(out, &painter, &bench, "8.8.8.8", "example.com", "A"));
+        assert!(text.contains("BENCHMARK example.com A @8.8.8.8"));
+        assert!(text.contains("queries: 3 successful, 1 failed"));
+        assert!(text.contains("1.0     4.0     2.0     8.0     9.0     9.0"));
+        assert!(text.contains("\u{2588}")); // histogram bars present
+    }
+
+    #[test]
+    fn write_bench_with_zero_successes_short_circuits() {
+        let bench = BenchResult {
+            successful: 0,
+            failed: 5,
+            min_ms: 0.0,
+            max_ms: 0.0,
+            avg_ms: 0.0,
+            p50_ms: 0.0,
+            p90_ms: 0.0,
+            p99_ms: 0.0,
+            histogram: vec![],
+        };
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_bench(out, &painter, &bench, "s", "n", "A"));
+        assert!(text.contains("no successful queries"));
+        assert!(!text.contains("min"));
+    }
+
+    // === format_ttl ===
+
+    #[test]
+    fn format_ttl_humanizes_and_keeps_two_largest_units() {
+        assert_eq!(format_ttl(0), "0s");
+        assert_eq!(format_ttl(59), "59s");
+        assert_eq!(format_ttl(60), "1m");
+        assert_eq!(format_ttl(3600), "1h");
+        assert_eq!(format_ttl(3661), "1h 1m"); // seconds dropped by truncate(2)
+        assert_eq!(format_ttl(86400), "1d");
+        assert_eq!(format_ttl(90061), "1d 1h");
+    }
 }
 
 // === Standard output ===
@@ -102,6 +316,10 @@ mod tests {
 pub fn print_short(result: &QueryResult) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_short(&mut out, result);
+}
+
+pub fn write_short<W: Write>(out: &mut W, result: &QueryResult) {
     for rr in &result.message.answers {
         let _ = writeln!(out, "{}", rr.rdata);
     }
@@ -117,26 +335,46 @@ pub fn print_full(
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_full(
+        &mut out,
+        &painter,
+        result,
+        server,
+        port,
+        show_authority,
+        show_additional,
+    );
+}
 
+#[allow(clippy::too_many_arguments)]
+pub fn write_full<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    result: &QueryResult,
+    server: &str,
+    port: u16,
+    show_authority: bool,
+    show_additional: bool,
+) {
     // Answer section
     if !result.message.answers.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ANSWER"));
-        print_record_table(&mut out, &painter, &result.message.answers);
+        print_record_table(out, painter, &result.message.answers);
     }
 
     // Authority section
     if show_authority && !result.message.authority.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "AUTHORITY"));
-        print_record_table(&mut out, &painter, &result.message.authority);
+        print_record_table(out, painter, &result.message.authority);
     }
 
     // Additional section
     if show_additional && !result.message.additional.is_empty() {
         let _ = writeln!(out);
         let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ADDITIONAL"));
-        print_record_table(&mut out, &painter, &result.message.additional);
+        print_record_table(out, painter, &result.message.additional);
     }
 
     // EDNS info
@@ -170,7 +408,7 @@ pub fn print_full(
     let _ = writeln!(out);
     let elapsed_ms = result.elapsed.as_millis();
     let rcode = &result.message.header.rcode;
-    let rcode_str = format_rcode(&painter, rcode);
+    let rcode_str = format_rcode(painter, rcode);
 
     let sep = painter.paint(DIM, "\u{2500}\u{2500}");
     let server_info = painter.paint(DIM, &format!("{}:{} ({})", server, port, result.protocol));
@@ -186,9 +424,17 @@ pub fn print_full(
 // === JSON output ===
 
 pub fn print_json(result: &QueryResult) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_json(&mut out, result);
+}
+
+pub fn write_json<W: Write>(out: &mut W, result: &QueryResult) {
     let output = JsonOutput::from_result(result);
     match serde_json::to_string_pretty(&output) {
-        Ok(json) => println!("{}", json),
+        Ok(json) => {
+            let _ = writeln!(out, "{}", json);
+        }
         Err(e) => eprint_error(&format!("JSON serialization failed: {}", e)),
     }
 }
@@ -196,9 +442,17 @@ pub fn print_json(result: &QueryResult) {
 // === YAML output ===
 
 pub fn print_yaml(result: &QueryResult) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_yaml(&mut out, result);
+}
+
+pub fn write_yaml<W: Write>(out: &mut W, result: &QueryResult) {
     let output = JsonOutput::from_result(result);
     match serde_yaml::to_string(&output) {
-        Ok(yaml) => print!("{}", yaml),
+        Ok(yaml) => {
+            let _ = write!(out, "{}", yaml);
+        }
         Err(e) => eprint_error(&format!("YAML serialization failed: {}", e)),
     }
 }
@@ -228,7 +482,10 @@ pub fn print_trace(hops: &[TraceHop]) {
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_trace(&mut out, &painter, hops);
+}
 
+pub fn write_trace<W: Write>(out: &mut W, painter: &Painter, hops: &[TraceHop]) {
     for (i, hop) in hops.iter().enumerate() {
         let _ = writeln!(out);
         let _ = writeln!(
@@ -245,19 +502,19 @@ pub fn print_trace(hops: &[TraceHop]) {
         // Show answers if present
         if !hop.result.message.answers.is_empty() {
             let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ANSWER"));
-            print_record_table(&mut out, &painter, &hop.result.message.answers);
+            print_record_table(out, painter, &hop.result.message.answers);
         }
 
         // Show authority section
         if !hop.result.message.authority.is_empty() {
             let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "AUTHORITY"));
-            print_record_table(&mut out, &painter, &hop.result.message.authority);
+            print_record_table(out, painter, &hop.result.message.authority);
         }
 
         // Show additional section (glue records)
         if !hop.result.message.additional.is_empty() {
             let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "ADDITIONAL"));
-            print_record_table(&mut out, &painter, &hop.result.message.additional);
+            print_record_table(out, painter, &hop.result.message.additional);
         }
     }
     let _ = writeln!(out);
@@ -269,7 +526,17 @@ pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) 
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_bench(&mut out, &painter, result, server, name, qtype);
+}
 
+pub fn write_bench<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    result: &BenchResult,
+    server: &str,
+    name: &str,
+    qtype: &str,
+) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -338,7 +605,10 @@ pub fn print_axfr(records: &[ResourceRecord]) {
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_axfr(&mut out, &painter, records);
+}
 
+pub fn write_axfr<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceRecord]) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -348,7 +618,7 @@ pub fn print_axfr(records: &[ResourceRecord]) {
     );
     let _ = writeln!(out);
 
-    print_record_table(&mut out, &painter, records);
+    print_record_table(out, painter, records);
     let _ = writeln!(out);
 }
 
@@ -358,7 +628,16 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_comparison(&mut out, &painter, results, name, qtype);
+}
 
+pub fn write_comparison<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    results: &[ComparisonResult],
+    name: &str,
+    qtype: &str,
+) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -380,12 +659,12 @@ pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
                     out,
                     " {} {} ({}ms)",
                     painter.paint(BOLD_YELLOW, &format!("@{}", comparison.server)),
-                    format_rcode(&painter, &r.message.header.rcode),
+                    format_rcode(painter, &r.message.header.rcode),
                     elapsed,
                 );
 
                 if !r.message.answers.is_empty() {
-                    print_record_table(&mut out, &painter, &r.message.answers);
+                    print_record_table(out, painter, &r.message.answers);
                 }
 
                 let answers: Vec<String> = r
@@ -450,11 +729,20 @@ pub fn print_batch_result(
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_batch_result(&mut out, &painter, name, qtype, result);
+}
 
+pub fn write_batch_result<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    name: &str,
+    qtype: &crate::protocol::types::RecordType,
+    result: &Result<QueryResult, crate::error::DnsError>,
+) {
     match result {
         Ok(r) => {
             let elapsed = r.elapsed.as_millis();
-            let rcode = format_rcode(&painter, &r.message.header.rcode);
+            let rcode = format_rcode(painter, &r.message.header.rcode);
             let _ = write!(
                 out,
                 " {} {} {} {}ms ",
@@ -489,7 +777,16 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
     let painter = Painter::new();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_propagation(&mut out, &painter, results, name, qtype);
+}
 
+pub fn write_propagation<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    results: &[PropagationResult],
+    name: &str,
+    qtype: &str,
+) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -521,7 +818,7 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
         match &propagation_result.result {
             Ok(r) => {
                 let elapsed = r.elapsed.as_millis();
-                let rcode_str = format_rcode(&painter, &r.message.header.rcode);
+                let rcode_str = format_rcode(painter, &r.message.header.rcode);
                 let _ = writeln!(
                     out,
                     " {} {} {}ms",
@@ -536,7 +833,7 @@ pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str)
                             out,
                             "   {} {}",
                             painter.paint(BOLD_CYAN, &rr.rtype.to_string()),
-                            format_rdata_colored(&painter, &rr.rdata),
+                            format_rdata_colored(painter, &rr.rdata),
                         );
                     }
                 }
