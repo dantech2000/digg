@@ -82,26 +82,13 @@ impl DnsMessage {
         let mut additional = Vec::new();
         let mut edns_info: Option<EdnsInfo> = None;
         for _ in 0..header.arcount {
-            // Peek at the record type before fully decoding
-            let (_, name_len) = crate::protocol::name::decode_name(buf, offset)?;
-            let type_pos = offset + name_len;
-            if type_pos + 10 <= buf.len() {
-                let rtype_val = u16::from_be_bytes([buf[type_pos], buf[type_pos + 1]]);
-                if rtype_val == 41 {
-                    // OPT pseudo-record: parse EDNS info from CLASS and TTL fields
-                    let class_val = u16::from_be_bytes([buf[type_pos + 2], buf[type_pos + 3]]);
-                    let ttl_val = u32::from_be_bytes([
-                        buf[type_pos + 4],
-                        buf[type_pos + 5],
-                        buf[type_pos + 6],
-                        buf[type_pos + 7],
-                    ]);
-                    edns_info = Some(edns::decode_opt_record(class_val, ttl_val));
-                }
-            }
-
             let (rr, consumed) = ResourceRecord::decode(buf, offset)?;
-            // Don't add OPT records to the additional section display
+            // OPT pseudo-record: CLASS carries the payload size, TTL the
+            // extended RCODE/version/flags, RDATA the option list. Extract
+            // EDNS info instead of showing it in the additional section.
+            if let crate::protocol::record::RData::OPT(ref rdata) = rr.rdata {
+                edns_info = Some(edns::decode_opt_record(rr.rclass.to_u16(), rr.ttl, rdata));
+            }
             if rr.rtype != RecordType::OPT {
                 additional.push(rr);
             }

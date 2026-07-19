@@ -213,12 +213,33 @@ mod tests {
             extended_rcode: 0,
             version: 0,
             dnssec_ok: true,
+            subnet: None,
         });
         result.message.header.ad = true;
         let painter = Painter::with_color(false);
         let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
         assert!(text.contains(" EDNS version 0; flags: do; udp: 1232"));
         assert!(text.contains(" flags: ad"));
+    }
+
+    #[test]
+    fn write_full_appends_returned_client_subnet_scope() {
+        let mut result = fixture_result(vec![a_record("cdn.example.com.", 60, [1, 2, 3, 4])]);
+        result.message.edns = Some(crate::protocol::edns::EdnsInfo {
+            udp_payload_size: 1232,
+            extended_rcode: 0,
+            version: 0,
+            dnssec_ok: false,
+            subnet: Some(crate::protocol::edns::ClientSubnet {
+                family: 1,
+                source_prefix: 24,
+                scope_prefix: 18,
+                address: "96.112.0.0".to_string(),
+            }),
+        });
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        assert!(text.contains("udp: 1232; subnet: 96.112.0.0/24/18"));
     }
 
     #[test]
@@ -381,13 +402,19 @@ pub fn write_full<W: Write>(
     if let Some(ref edns) = result.message.edns {
         let _ = writeln!(out);
         let flags = if edns.dnssec_ok { "do" } else { "" };
+        let subnet = edns
+            .subnet
+            .as_ref()
+            .map(|s| format!("; subnet: {}", s))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            " {} version {}; flags: {}; udp: {}",
+            " {} version {}; flags: {}; udp: {}{}",
             painter.paint(DIM, "EDNS"),
             edns.version,
             flags,
-            edns.udp_payload_size
+            edns.udp_payload_size,
+            subnet
         );
     }
 

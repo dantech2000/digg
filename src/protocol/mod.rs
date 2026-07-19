@@ -118,6 +118,7 @@ mod tests {
             udp_payload_size: 1232,
             version: 3,
             dnssec_ok: true,
+            ..EdnsOptions::default()
         };
         let wire = encode_opt_record(&options);
 
@@ -130,6 +131,7 @@ mod tests {
         let info = decode_opt_record(
             u16::from_be_bytes([wire[3], wire[4]]),
             u32::from_be_bytes([wire[5], wire[6], wire[7], wire[8]]),
+            &wire[11..],
         );
         assert_eq!(info.udp_payload_size, options.udp_payload_size);
         assert_eq!(info.extended_rcode, 0);
@@ -323,6 +325,7 @@ mod tests {
             udp_payload_size: 1232,
             version: 0,
             dnssec_ok: true,
+            ..EdnsOptions::default()
         };
         let (query, query_id) =
             DnsMessage::build_query("example.com", RecordType::A, true, Some(&options)).unwrap();

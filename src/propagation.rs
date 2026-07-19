@@ -63,13 +63,8 @@ pub fn check_propagation(
     name: &str,
     qtype: RecordType,
     timeout: Duration,
-    dnssec: bool,
+    edns: EdnsOptions,
 ) -> Vec<PropagationResult> {
-    let edns = EdnsOptions {
-        dnssec_ok: dnssec,
-        ..EdnsOptions::default()
-    };
-
     let mut results = Vec::with_capacity(PUBLIC_RESOLVERS.len());
 
     std::thread::scope(|s| {
