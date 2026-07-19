@@ -120,3 +120,70 @@ fn build_histogram(sorted: &[f64], buckets: usize) -> Vec<(f64, usize)> {
     }
     hist
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{build_histogram, percentile};
+
+    #[test]
+    fn percentile_of_empty_set_is_zero_not_nan() {
+        assert_eq!(percentile(&[], 50), 0.0);
+        assert_eq!(percentile(&[], 99), 0.0);
+    }
+
+    #[test]
+    fn percentile_of_single_element_is_that_element() {
+        assert_eq!(percentile(&[42.0], 0), 42.0);
+        assert_eq!(percentile(&[42.0], 50), 42.0);
+        assert_eq!(percentile(&[42.0], 100), 42.0);
+    }
+
+    #[test]
+    fn percentile_matches_hand_computed_values() {
+        let sorted: Vec<f64> = (1..=10).map(|n| n as f64).collect();
+        // index = round(pct/100 * 9)
+        assert_eq!(percentile(&sorted, 0), 1.0);
+        assert_eq!(percentile(&sorted, 50), 6.0); // round(4.5) = 5 -> value 6.0
+        assert_eq!(percentile(&sorted, 90), 9.0); // round(8.1) = 8 -> value 9.0
+        assert_eq!(percentile(&sorted, 99), 10.0); // round(8.91) = 9 -> value 10.0
+        assert_eq!(percentile(&sorted, 100), 10.0);
+    }
+
+    #[test]
+    fn percentile_index_is_clamped_to_last_element() {
+        // pct > 100 must not index out of bounds.
+        assert_eq!(percentile(&[1.0, 2.0], 200), 2.0);
+    }
+
+    #[test]
+    fn histogram_of_empty_set_is_empty() {
+        assert!(build_histogram(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn histogram_of_identical_latencies_collapses_to_one_bucket() {
+        // Degenerate range (< 0.001) takes the single-bucket branch.
+        let hist = build_histogram(&[5.0, 5.0, 5.0], 10);
+        assert_eq!(hist, vec![(5.0, 3)]);
+    }
+
+    #[test]
+    fn histogram_counts_every_sample_exactly_once() {
+        let sorted = vec![0.0, 1.0, 2.5, 5.0, 7.5, 10.0];
+        let hist = build_histogram(&sorted, 4);
+        assert_eq!(hist.len(), 4);
+        let total: usize = hist.iter().map(|(_, c)| c).sum();
+        assert_eq!(total, sorted.len());
+    }
+
+    #[test]
+    fn histogram_bucket_boundaries_do_not_double_count() {
+        // Values exactly on bucket edges must land in exactly one bucket.
+        let sorted = vec![0.0, 2.5, 5.0, 7.5, 10.0];
+        let hist = build_histogram(&sorted, 4);
+        let total: usize = hist.iter().map(|(_, c)| c).sum();
+        assert_eq!(total, sorted.len());
+        // First bucket is inclusive on both ends: contains 0.0 and 2.5.
+        assert_eq!(hist[0].1, 2);
+    }
+}

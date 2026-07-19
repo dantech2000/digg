@@ -439,3 +439,295 @@ pub fn print_usage() {
     {dim}${reset} {green}digg{reset} AXFR example.com @ns1.example.com {dim}# zone transfer{reset}"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::ColorMode;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn parse(list: &[&str]) -> Options {
+        parse_args(&args(list)).expect("expected successful parse")
+    }
+
+    fn parse_err(list: &[&str]) -> String {
+        match parse_args(&args(list)) {
+            Err(DnsError::Usage(msg)) => msg,
+            Err(other) => panic!("expected usage error, got {:?}", other),
+            Ok(_) => panic!("expected parse to fail"),
+        }
+    }
+
+    // === Positional query resolution ===
+
+    #[test]
+    fn no_positionals_defaults_to_root_a_query() {
+        let opts = parse(&[]);
+        assert_eq!(opts.queries, vec![(RecordType::A, ".".to_string())]);
+    }
+
+    #[test]
+    fn bare_name_defaults_to_a_query() {
+        let opts = parse(&["example.com"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::A, "example.com".to_string())]
+        );
+        assert_eq!(opts.name, "example.com");
+        assert_eq!(opts.qtype, RecordType::A);
+    }
+
+    #[test]
+    fn name_then_type_pairs() {
+        let opts = parse(&["example.com", "AAAA"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::AAAA, "example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn type_then_name_pairs() {
+        let opts = parse(&["AAAA", "example.com"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::AAAA, "example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn record_type_is_case_insensitive() {
+        let opts = parse(&["example.com", "mx"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::MX, "example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn multi_query_type_name_pairs_resolve_in_order() {
+        let opts = parse(&["A", "example.com", "AAAA", "example.org"]);
+        assert_eq!(
+            opts.queries,
+            vec![
+                (RecordType::A, "example.com".to_string()),
+                (RecordType::AAAA, "example.org".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_types_in_a_row_apply_to_the_next_name() {
+        // First type is deferred, second pairs with the name, deferred type
+        // then reuses the first query's name.
+        let opts = parse(&["A", "AAAA", "example.com"]);
+        assert_eq!(
+            opts.queries,
+            vec![
+                (RecordType::AAAA, "example.com".to_string()),
+                (RecordType::A, "example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn type_alone_queries_root() {
+        let opts = parse(&["NS"]);
+        assert_eq!(opts.queries, vec![(RecordType::NS, ".".to_string())]);
+    }
+
+    #[test]
+    fn bare_ipv4_becomes_ptr_query() {
+        let opts = parse(&["192.0.2.1"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::PTR, "1.2.0.192.in-addr.arpa".to_string())]
+        );
+    }
+
+    #[test]
+    fn bare_ipv6_becomes_ptr_query() {
+        let opts = parse(&["2001:db8::567:89ab"]);
+        assert_eq!(
+            opts.queries,
+            vec![(
+                RecordType::PTR,
+                "b.a.9.8.7.6.5.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn explicit_type_disables_ip_auto_reverse() {
+        // "8.8.8.8 A" means query the literal name, not a PTR lookup.
+        let opts = parse(&["8.8.8.8", "A"]);
+        assert_eq!(opts.queries, vec![(RecordType::A, "8.8.8.8".to_string())]);
+    }
+
+    #[test]
+    fn multiple_bare_names_each_get_a_query() {
+        let opts = parse(&["example.com", "example.org"]);
+        assert_eq!(
+            opts.queries,
+            vec![
+                (RecordType::A, "example.com".to_string()),
+                (RecordType::A, "example.org".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn axfr_type_sets_axfr_mode() {
+        let opts = parse(&["AXFR", "example.com"]);
+        assert!(opts.axfr);
+        assert_eq!(opts.qtype, RecordType::AXFR);
+    }
+
+    // === Server and flag arguments ===
+
+    #[test]
+    fn at_servers_accumulate_in_order() {
+        let opts = parse(&["@8.8.8.8", "example.com", "@1.1.1.1"]);
+        assert_eq!(opts.servers, vec!["8.8.8.8", "1.1.1.1"]);
+        assert_eq!(opts.server(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn port_flag_parses() {
+        let opts = parse(&["-p", "5353", "example.com"]);
+        assert_eq!(opts.port, 5353);
+    }
+
+    #[test]
+    fn port_flag_rejects_non_numeric_and_out_of_range() {
+        assert!(parse_err(&["-p", "abc"]).contains("invalid port"));
+        assert!(parse_err(&["-p", "99999"]).contains("invalid port"));
+        assert!(parse_err(&["-p"]).contains("requires a port"));
+    }
+
+    #[test]
+    fn batch_flag_requires_filename() {
+        let opts = parse(&["-f", "domains.txt"]);
+        assert_eq!(opts.batch_file.as_deref(), Some("domains.txt"));
+        assert!(parse_err(&["-f"]).contains("requires a filename"));
+    }
+
+    #[test]
+    fn reverse_flag_builds_ptr_query() {
+        let opts = parse(&["-x", "192.0.2.1"]);
+        assert_eq!(opts.qtype, RecordType::PTR);
+        assert_eq!(opts.name, "1.2.0.192.in-addr.arpa");
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::PTR, "1.2.0.192.in-addr.arpa".to_string())]
+        );
+        assert!(parse_err(&["-x"]).contains("requires an address"));
+        assert!(parse_err(&["-x", "not-an-ip"]).contains("invalid address"));
+    }
+
+    #[test]
+    fn unknown_dash_option_is_a_usage_error() {
+        assert!(parse_err(&["-z"]).contains("unknown option"));
+    }
+
+    #[test]
+    fn unknown_plus_option_is_a_usage_error() {
+        assert!(parse_err(&["+bogus"]).contains("unknown option"));
+    }
+
+    // === Plus options ===
+
+    #[test]
+    fn paired_toggles_last_one_wins() {
+        assert_eq!(parse(&["+tcp", "+notcp"]).tcp, Some(false));
+        assert_eq!(parse(&["+notcp", "+tcp"]).tcp, Some(true));
+        assert!(!parse(&["+recurse", "+norecurse"]).recurse);
+        assert!(!parse(&["+authority", "+noauthority"]).show_authority);
+        assert!(!parse(&["+additional", "+noadditional"]).show_additional);
+        assert!(!parse(&["+edns", "+noedns"]).edns);
+        assert!(matches!(
+            parse(&["+color", "+nocolor"]).color,
+            ColorMode::Never
+        ));
+    }
+
+    #[test]
+    fn simple_flags_set_their_options() {
+        assert!(parse(&["+short"]).short);
+        assert!(parse(&["+trace"]).trace);
+        assert!(parse(&["+dnssec"]).dnssec);
+        assert!(parse(&["+json"]).json);
+        assert!(parse(&["+yaml"]).yaml);
+        assert!(parse(&["+dot"]).dot);
+        assert!(parse(&["+propagation"]).propagation);
+        assert!(parse(&["+prop"]).propagation);
+    }
+
+    #[test]
+    fn timeout_parses_and_rejects_zero_or_garbage() {
+        assert_eq!(parse(&["+timeout=30"]).timeout, 30);
+        assert!(parse_err(&["+timeout=0"]).contains("timeout must be > 0"));
+        assert!(parse_err(&["+timeout=abc"]).contains("invalid timeout"));
+        assert!(parse_err(&["+timeout="]).contains("invalid timeout"));
+    }
+
+    #[test]
+    fn bench_defaults_to_100_and_rejects_zero_or_garbage() {
+        assert_eq!(parse(&["+bench"]).bench, Some(100));
+        assert_eq!(parse(&["+bench=50"]).bench, Some(50));
+        assert!(parse_err(&["+bench=0"]).contains("bench count must be > 0"));
+        assert!(parse_err(&["+bench=abc"]).contains("invalid bench count"));
+    }
+
+    #[test]
+    fn watch_defaults_to_2s_and_rejects_zero_or_garbage() {
+        assert_eq!(parse(&["+watch"]).watch, Some(2));
+        assert_eq!(parse(&["+watch=10"]).watch, Some(10));
+        assert!(parse_err(&["+watch=0"]).contains("watch interval must be > 0"));
+        assert!(parse_err(&["+watch=abc"]).contains("invalid watch interval"));
+    }
+
+    #[test]
+    fn doh_variants_parse() {
+        assert_eq!(parse(&["+doh"]).doh.as_deref(), Some(""));
+        assert_eq!(parse(&["+doh=google"]).doh.as_deref(), Some("google"));
+        assert_eq!(
+            parse(&["+doh=https://example.net/dns-query"])
+                .doh
+                .as_deref(),
+            Some("https://example.net/dns-query")
+        );
+    }
+
+    // === reverse_name ===
+
+    #[test]
+    fn reverse_name_ipv4_reverses_octets() {
+        assert_eq!(reverse_name("192.0.2.1").unwrap(), "1.2.0.192.in-addr.arpa");
+        assert_eq!(reverse_name("8.8.8.8").unwrap(), "8.8.8.8.in-addr.arpa");
+    }
+
+    #[test]
+    fn reverse_name_ipv6_expands_nibbles_like_dig() {
+        // Known-good value cross-checked against `dig -x 2001:db8::567:89ab`.
+        assert_eq!(
+            reverse_name("2001:db8::567:89ab").unwrap(),
+            "b.a.9.8.7.6.5.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
+        );
+        assert_eq!(
+            reverse_name("::1").unwrap(),
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
+        );
+    }
+
+    #[test]
+    fn reverse_name_rejects_invalid_input() {
+        assert!(reverse_name("example.com").is_err());
+        assert!(reverse_name("").is_err());
+        assert!(reverse_name("256.1.1.1").is_err());
+    }
+}
