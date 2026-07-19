@@ -32,6 +32,41 @@ pub enum ColorMode {
 }
 
 static COLOR_MODE: AtomicU8 = AtomicU8::new(0);
+static IDN_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_idn_out(enabled: bool) {
+    IDN_OUT.store(enabled, Ordering::Relaxed);
+}
+
+/// Convert A-labels to Unicode for display when +idnout is active. Applies
+/// to the human-oriented formats only; JSON/YAML/TSV/compat keep A-labels
+/// so machine output stays ASCII.
+fn display_name(name: &str) -> String {
+    if IDN_OUT.load(Ordering::Relaxed) {
+        crate::idn::to_unicode_lossy(name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn display_rdata(rdata: &RData) -> String {
+    let text = rdata.to_string();
+    if IDN_OUT.load(Ordering::Relaxed) && rdata.is_name() && text.contains("xn--") {
+        // Name-bearing rdata (CNAME/NS/MX/SRV targets): convert name tokens.
+        text.split(' ')
+            .map(|token| {
+                if token.contains("xn--") {
+                    crate::idn::to_unicode_lossy(token)
+                } else {
+                    token.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        text
+    }
+}
 
 pub fn set_color_mode(mode: ColorMode) {
     let value = match mode {
@@ -557,7 +592,7 @@ pub fn print_short(result: &QueryResult) {
 
 pub fn write_short<W: Write>(out: &mut W, result: &QueryResult) {
     for rr in &result.message.answers {
-        let _ = writeln!(out, "{}", rr.rdata);
+        let _ = writeln!(out, "{}", display_rdata(&rr.rdata));
     }
 }
 
@@ -1471,7 +1506,7 @@ fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[Resou
 
     for rr in records {
         let type_pad = format!("{:<1$}", rr.rtype, type_width);
-        let name_pad = format!("{:<1$}", rr.name, name_width);
+        let name_pad = format!("{:<1$}", display_name(&rr.name), name_width);
         let ttl_pad = format!("{:<1$}", format_ttl(rr.ttl), ttl_width);
         let type_str = painter.paint(BOLD_CYAN, &type_pad);
         let name_str = name_pad;
@@ -1487,7 +1522,7 @@ fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[Resou
 }
 
 fn format_rdata_colored(painter: &Painter, rdata: &RData) -> String {
-    let text = rdata.to_string();
+    let text = display_rdata(rdata);
     if matches!(rdata, RData::A(_) | RData::AAAA(_)) {
         painter.paint(GREEN, &text)
     } else if rdata.is_name() {

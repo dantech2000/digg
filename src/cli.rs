@@ -55,6 +55,8 @@ pub struct Options {
     pub retry: u32,
     pub qr: bool,
     pub stats: bool,
+    pub idn_in: bool,
+    pub idn_out: bool,
     pub queries: Vec<(RecordType, String)>,
 }
 
@@ -93,6 +95,8 @@ impl Default for Options {
             retry: 2,
             qr: false,
             stats: true,
+            idn_in: true,
+            idn_out: false,
             queries: Vec::new(),
         }
     }
@@ -216,6 +220,18 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         opts.axfr = true;
     }
 
+    // IDN: convert U-labels to A-labels before anything touches the wire.
+    if opts.idn_in {
+        for (_, name) in opts.queries.iter_mut() {
+            if !name.is_ascii() {
+                *name = crate::idn::to_ascii(name)?;
+            }
+        }
+        if let Some((_, name)) = opts.queries.first() {
+            opts.name = name.clone();
+        }
+    }
+
     if opts.subnet.is_some() && !opts.edns {
         return Err(DnsError::Usage(
             "+subnet requires EDNS; remove +noedns".into(),
@@ -332,6 +348,10 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+noqr" => opts.qr = false,
         "+stats" => opts.stats = true,
         "+nostats" => opts.stats = false,
+        "+idnin" => opts.idn_in = true,
+        "+noidnin" => opts.idn_in = false,
+        "+idnout" => opts.idn_out = true,
+        "+noidnout" => opts.idn_out = false,
         "+watch" => opts.watch = Some(2),
         "+doh" => opts.doh = Some(String::new()),
         s if s.starts_with("+timeout=") => {
@@ -525,6 +545,8 @@ pub fn print_usage() {
 
 {bold}DISPLAY:{reset}
     {yellow}+qr{reset}             Print the outgoing query before sending
+    {yellow}+idnout{reset}         Display internationalized names as Unicode
+    {yellow}+noidnin{reset}        Send non-ASCII names raw {dim}(no punycode conversion){reset}
     {yellow}+nostats{reset}        Hide the server/rcode/time/size footer
     {yellow}+color{reset}          Force color output
     {yellow}+nocolor{reset}        Disable color output
@@ -1022,5 +1044,50 @@ mod tests {
     fn compat_flag_parses() {
         assert!(parse(&["e.com", "+compat"]).compat);
         assert!(!parse(&["e.com"]).compat);
+    }
+
+    // === IDN ===
+
+    #[test]
+    fn unicode_names_convert_to_punycode_by_default() {
+        let opts = parse(&["münchen.de"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::A, "xn--mnchen-3ya.de".to_string())]
+        );
+        assert_eq!(opts.name, "xn--mnchen-3ya.de");
+    }
+
+    #[test]
+    fn noidnin_sends_raw_names() {
+        let opts = parse(&["münchen.de", "+noidnin"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::A, "münchen.de".to_string())]
+        );
+    }
+
+    #[test]
+    fn idn_conversion_applies_to_multi_query_names() {
+        let opts = parse(&["A", "münchen.de", "AAAA", "日本.jp"]);
+        assert_eq!(
+            opts.queries,
+            vec![
+                (RecordType::A, "xn--mnchen-3ya.de".to_string()),
+                (RecordType::AAAA, "xn--wgv71a.jp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_idn_is_a_usage_error() {
+        assert!(parse_err(&["exa\u{2028}mple.com"]).contains("invalid internationalized"));
+    }
+
+    #[test]
+    fn idnout_toggles_parse() {
+        assert!(parse(&["e.com", "+idnout"]).idn_out);
+        assert!(!parse(&["e.com", "+idnout", "+noidnout"]).idn_out);
+        assert!(!parse(&["e.com"]).idn_out);
     }
 }
