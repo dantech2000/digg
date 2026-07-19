@@ -86,7 +86,15 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             opts.dnssec,
         );
         for (name, qtype, result) in &results {
-            output::print_batch_result(name, qtype, result);
+            if opts.tsv {
+                // Machine format: answer lines to stdout, failures to stderr.
+                match result {
+                    Ok(r) => output::print_tsv(r),
+                    Err(e) => output::eprint_error(&format!("{} {}: {}", qtype, name, e)),
+                }
+            } else {
+                output::print_batch_result(name, qtype, result);
+            }
         }
         return Ok(0);
     }
@@ -176,7 +184,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
     let mut exit_code = 0;
 
     for (i, (qtype, name)) in opts.queries.iter().enumerate() {
-        if i > 0 {
+        if i > 0 && !opts.tsv {
             println!();
         }
 
@@ -211,6 +219,8 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             output::print_json(&result);
         } else if opts.yaml {
             output::print_yaml(&result);
+        } else if opts.tsv {
+            output::print_tsv(&result);
         } else if opts.short {
             output::print_short(&result);
         } else {

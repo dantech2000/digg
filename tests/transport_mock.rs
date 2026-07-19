@@ -366,3 +366,15 @@ fn nostats_hides_the_status_footer() {
     assert!(text.contains("1.2.3.4"));
     assert!(!text.contains("NOERROR"));
 }
+
+#[test]
+fn tsv_output_is_stable_tab_separated_lines() {
+    static ADDRS: [[u8; 4]; 2] = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+    let output = run_digg(server.port, &["+tsv"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "example.com.\t60\tIN\tA\t1.2.3.4\nexample.com.\t60\tIN\tA\t5.6.7.8\n"
+    );
+}
