@@ -147,9 +147,13 @@ impl fmt::Display for RecordType {
     }
 }
 
+#[allow(clippy::upper_case_acronyms)] // DNS class names are standardized uppercase mnemonics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RecordClass {
     IN,
+    CH,
+    HS,
+    ANY,
     Unknown(u16),
 }
 
@@ -157,6 +161,9 @@ impl RecordClass {
     pub fn from_u16(val: u16) -> Self {
         match val {
             1 => RecordClass::IN,
+            3 => RecordClass::CH,
+            4 => RecordClass::HS,
+            255 => RecordClass::ANY,
             n => RecordClass::Unknown(n),
         }
     }
@@ -164,7 +171,27 @@ impl RecordClass {
     pub fn to_u16(self) -> u16 {
         match self {
             RecordClass::IN => 1,
+            RecordClass::CH => 3,
+            RecordClass::HS => 4,
+            RecordClass::ANY => 255,
             RecordClass::Unknown(n) => n,
+        }
+    }
+
+    /// Parse a class mnemonic or RFC 3597 `CLASS<N>` numeric syntax.
+    pub fn parse_name(s: &str) -> Option<Self> {
+        let upper = s.to_uppercase();
+        if let Some(num) = upper.strip_prefix("CLASS") {
+            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+                return num.parse::<u16>().ok().map(RecordClass::from_u16);
+            }
+        }
+        match upper.as_str() {
+            "IN" => Some(RecordClass::IN),
+            "CH" | "CHAOS" => Some(RecordClass::CH),
+            "HS" | "HESIOD" => Some(RecordClass::HS),
+            "ANY" => Some(RecordClass::ANY),
+            _ => None,
         }
     }
 }
@@ -173,6 +200,9 @@ impl fmt::Display for RecordClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RecordClass::IN => write!(f, "IN"),
+            RecordClass::CH => write!(f, "CH"),
+            RecordClass::HS => write!(f, "HS"),
+            RecordClass::ANY => write!(f, "ANY"),
             RecordClass::Unknown(n) => write!(f, "CLASS{}", n),
         }
     }
@@ -290,5 +320,32 @@ mod tests {
     #[test]
     fn unknown_types_display_as_type_n() {
         assert_eq!(RecordType::Unknown(64512).to_string(), "TYPE64512");
+    }
+
+    #[test]
+    fn record_class_mnemonics_and_class_n_parse() {
+        use super::RecordClass;
+        assert_eq!(RecordClass::parse_name("in"), Some(RecordClass::IN));
+        assert_eq!(RecordClass::parse_name("CH"), Some(RecordClass::CH));
+        assert_eq!(RecordClass::parse_name("chaos"), Some(RecordClass::CH));
+        assert_eq!(RecordClass::parse_name("HS"), Some(RecordClass::HS));
+        assert_eq!(RecordClass::parse_name("ANY"), Some(RecordClass::ANY));
+        assert_eq!(RecordClass::parse_name("CLASS3"), Some(RecordClass::CH));
+        assert_eq!(
+            RecordClass::parse_name("CLASS42"),
+            Some(RecordClass::Unknown(42))
+        );
+        assert_eq!(RecordClass::parse_name("CLASS70000"), None);
+        assert_eq!(RecordClass::parse_name("XX"), None);
+    }
+
+    #[test]
+    fn record_class_round_trips_wire_values() {
+        use super::RecordClass;
+        for val in [1u16, 3, 4, 255, 42] {
+            assert_eq!(RecordClass::from_u16(val).to_u16(), val);
+        }
+        assert_eq!(RecordClass::CH.to_string(), "CH");
+        assert_eq!(RecordClass::Unknown(42).to_string(), "CLASS42");
     }
 }

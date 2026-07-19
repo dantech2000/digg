@@ -274,3 +274,25 @@ fn timeout_flag_bounds_wall_clock() {
         elapsed
     );
 }
+
+#[test]
+fn chaos_class_query_round_trips_through_transport() {
+    static ADDRS: [[u8; 4]; 1] = [[127, 0, 0, 1]];
+    let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+    let output = Command::new(env!("CARGO_BIN_EXE_digg"))
+        .args([
+            "@127.0.0.1",
+            "-p",
+            &server.port.to_string(),
+            "-c",
+            "CH",
+            "version.bind",
+            "TXT",
+            "+nocolor",
+        ])
+        .env("HOME", std::env::temp_dir())
+        .output()
+        .expect("run digg");
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("NOERROR"));
+}

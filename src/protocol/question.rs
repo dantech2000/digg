@@ -12,10 +12,14 @@ pub struct Question {
 
 impl Question {
     pub fn new(name: &str, qtype: RecordType) -> Self {
+        Self::new_with_class(name, qtype, RecordClass::IN)
+    }
+
+    pub fn new_with_class(name: &str, qtype: RecordType, qclass: RecordClass) -> Self {
         Question {
             name: name.to_string(),
             qtype,
-            qclass: RecordClass::IN,
+            qclass,
         }
     }
 

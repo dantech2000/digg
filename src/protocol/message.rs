@@ -3,7 +3,7 @@ use crate::protocol::edns::{self, EdnsInfo, EdnsOptions};
 use crate::protocol::header::Header;
 use crate::protocol::question::Question;
 use crate::protocol::record::ResourceRecord;
-use crate::protocol::types::RecordType;
+use crate::protocol::types::{RecordClass, RecordType};
 use rand::Rng;
 use serde::Serialize;
 
@@ -24,6 +24,16 @@ impl DnsMessage {
         rd: bool,
         edns_opts: Option<&EdnsOptions>,
     ) -> Result<(Vec<u8>, u16), DnsError> {
+        Self::build_query_with_class(name, qtype, RecordClass::IN, rd, edns_opts)
+    }
+
+    pub fn build_query_with_class(
+        name: &str,
+        qtype: RecordType,
+        qclass: RecordClass,
+        rd: bool,
+        edns_opts: Option<&EdnsOptions>,
+    ) -> Result<(Vec<u8>, u16), DnsError> {
         let mut rng = rand::thread_rng();
         let id: u16 = rng.gen();
         let mut header = Header::new_query(id, rd);
@@ -32,7 +42,7 @@ impl DnsMessage {
             header.arcount = 1;
         }
 
-        let question = Question::new(name, qtype);
+        let question = Question::new_with_class(name, qtype, qclass);
 
         let mut buf = header.encode();
         buf.extend(question.encode()?);

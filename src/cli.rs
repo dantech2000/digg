@@ -1,6 +1,6 @@
 use crate::error::DnsError;
 use crate::output::ColorMode;
-use crate::protocol::types::RecordType;
+use crate::protocol::types::{RecordClass, RecordType};
 
 pub fn load_config_file() -> Vec<String> {
     let home = match std::env::var("HOME") {
@@ -25,6 +25,7 @@ pub struct Options {
     pub servers: Vec<String>,
     pub name: String,
     pub qtype: RecordType,
+    pub qclass: RecordClass,
     pub port: u16,
     pub short: bool,
     pub color: ColorMode,
@@ -56,6 +57,7 @@ impl Default for Options {
             servers: Vec::new(),
             name: ".".to_string(),
             qtype: RecordType::A,
+            qclass: RecordClass::IN,
             port: 53,
             short: false,
             color: ColorMode::Auto,
@@ -125,6 +127,21 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
             opts.port = args[i]
                 .parse()
                 .map_err(|_| DnsError::Usage(format!("invalid port: {}", args[i])))?;
+            i += 1;
+            continue;
+        }
+
+        if arg == "-c" {
+            i += 1;
+            if i >= args.len() {
+                return Err(DnsError::Usage("-c requires a class argument".into()));
+            }
+            opts.qclass = RecordClass::parse_name(&args[i]).ok_or_else(|| {
+                DnsError::Usage(format!(
+                    "invalid class: {} (expected IN, CH, HS, ANY, or CLASS<N>)",
+                    args[i]
+                ))
+            })?;
             i += 1;
             continue;
         }
@@ -393,6 +410,7 @@ pub fn print_usage() {
 {bold}OPTIONS:{reset}
     {yellow}-x{reset} addr         Reverse DNS lookup (builds PTR query automatically)
     {yellow}-p{reset} port         DNS server port {dim}(default: 53){reset}
+    {yellow}-c{reset} class        Query class: IN CH HS ANY {dim}(default: IN){reset}
     {yellow}-f{reset} file         Batch mode: read queries from file ({dim}use - for stdin{reset})
     {yellow}-h{reset}, {yellow}--help{reset}      Show this help message
     {yellow}-V{reset}, {yellow}--version{reset}   Show version
@@ -788,5 +806,27 @@ mod tests {
         // Bare "TYPE" with no digits is a hostname, not type syntax.
         let opts = parse(&["type"]);
         assert_eq!(opts.queries, vec![(RecordType::A, "type".to_string())]);
+    }
+
+    // === Query class (-c) ===
+
+    #[test]
+    fn class_flag_parses_mnemonics_and_class_n() {
+        assert_eq!(
+            parse(&["-c", "CH", "version.bind", "TXT"]).qclass,
+            RecordClass::CH
+        );
+        assert_eq!(parse(&["-c", "in", "example.com"]).qclass, RecordClass::IN);
+        assert_eq!(
+            parse(&["-c", "CLASS4", "example.com"]).qclass,
+            RecordClass::HS
+        );
+        assert_eq!(parse(&["example.com"]).qclass, RecordClass::IN);
+    }
+
+    #[test]
+    fn class_flag_rejects_unknown_and_missing_values() {
+        assert!(parse_err(&["-c", "XX"]).contains("invalid class"));
+        assert!(parse_err(&["-c"]).contains("requires a class"));
     }
 }

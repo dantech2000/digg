@@ -339,4 +339,18 @@ mod tests {
             Err(DnsError::Protocol(_))
         ));
     }
+
+    #[test]
+    fn questions_encode_explicit_class() {
+        use crate::protocol::question::Question;
+        use crate::protocol::types::{RecordClass, RecordType};
+        let q = Question::new_with_class("version.bind", RecordType::TXT, RecordClass::CH);
+        let encoded = q.encode().unwrap();
+        // Last four bytes: QTYPE=16 (TXT), QCLASS=3 (CH).
+        let n = encoded.len();
+        assert_eq!(&encoded[n - 4..], &[0x00, 0x10, 0x00, 0x03]);
+
+        let (decoded, _) = Question::decode(&encoded, 0).unwrap();
+        assert_eq!(decoded.qclass, RecordClass::CH);
+    }
 }
