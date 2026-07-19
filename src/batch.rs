@@ -106,3 +106,65 @@ pub fn run_batch(
     }
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_batch_line, read_batch_queries};
+    use crate::protocol::types::RecordType;
+
+    #[test]
+    fn batch_line_full_query_parses_all_fields() {
+        let q = parse_batch_line("@8.8.8.8 example.com MX");
+        assert_eq!(q.name, "example.com");
+        assert_eq!(q.qtype, RecordType::MX);
+        assert_eq!(q.server.as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn batch_line_tokens_are_order_independent() {
+        let a = parse_batch_line("@8.8.8.8 MX example.com");
+        let b = parse_batch_line("example.com MX @8.8.8.8");
+        let c = parse_batch_line("MX @8.8.8.8 example.com");
+        for q in [a, b, c] {
+            assert_eq!(q.name, "example.com");
+            assert_eq!(q.qtype, RecordType::MX);
+            assert_eq!(q.server.as_deref(), Some("8.8.8.8"));
+        }
+    }
+
+    #[test]
+    fn batch_line_missing_fields_use_defaults() {
+        let q = parse_batch_line("example.com");
+        assert_eq!(q.name, "example.com");
+        assert_eq!(q.qtype, RecordType::A);
+        assert_eq!(q.server, None);
+    }
+
+    #[test]
+    fn batch_line_repeated_tokens_last_one_wins() {
+        let q = parse_batch_line("a.example b.example A TXT @1.1.1.1 @9.9.9.9");
+        assert_eq!(q.name, "b.example");
+        assert_eq!(q.qtype, RecordType::TXT);
+        assert_eq!(q.server.as_deref(), Some("9.9.9.9"));
+    }
+
+    #[test]
+    fn batch_file_skips_comments_and_blank_lines() {
+        let path = std::env::temp_dir().join(format!("digg_batch_test_{}.txt", std::process::id()));
+        std::fs::write(
+            &path,
+            "# header comment\n\nexample.com A\n  \n# tail\nexample.org\n",
+        )
+        .unwrap();
+        let queries = read_batch_queries(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].name, "example.com");
+        assert_eq!(queries[1].name, "example.org");
+    }
+
+    #[test]
+    fn batch_file_missing_is_a_usage_error() {
+        assert!(read_batch_queries("/nonexistent/digg-batch.txt").is_err());
+    }
+}

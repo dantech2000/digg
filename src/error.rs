@@ -34,3 +34,24 @@ impl From<std::io::Error> for DnsError {
         DnsError::Network(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DnsError;
+
+    #[test]
+    fn exit_codes_are_a_stable_contract() {
+        // Scripts depend on these values; changing them is a breaking change.
+        assert_eq!(DnsError::Usage("x".into()).exit_code(), 1);
+        assert_eq!(DnsError::Protocol("x".into()).exit_code(), 2);
+        assert_eq!(DnsError::Network("x".into()).exit_code(), 9);
+    }
+
+    #[test]
+    fn io_errors_convert_to_network_errors() {
+        let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let err: DnsError = io.into();
+        assert_eq!(err.exit_code(), 9);
+        assert_eq!(err.to_string(), "timed out");
+    }
+}
