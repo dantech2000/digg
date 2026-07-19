@@ -169,7 +169,8 @@ mod tests {
     fn write_full_golden_single_answer() {
         let result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
         let painter = Painter::with_color(false);
-        let text = render(|out| write_full(out, &painter, &result, "8.8.8.8", 53, true, true));
+        let text =
+            render(|out| write_full(out, &painter, &result, "8.8.8.8", 53, true, true, true));
         let expected = "\n ANSWER\n \
              TYPE   NAME           TTL   VALUE\n \
              A      example.com.   1h    93.184.216.34\n\
@@ -181,7 +182,8 @@ mod tests {
     fn write_full_contains_no_ansi_escapes_when_color_off() {
         let result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
         let painter = Painter::with_color(false);
-        let text = render(|out| write_full(out, &painter, &result, "1.1.1.1", 53, true, true));
+        let text =
+            render(|out| write_full(out, &painter, &result, "1.1.1.1", 53, true, true, true));
         assert!(!text.contains('\x1b'));
     }
 
@@ -198,10 +200,10 @@ mod tests {
             .push(a_record("glue.example.com.", 60, [9, 9, 9, 9]));
 
         let painter = Painter::with_color(false);
-        let shown = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        let shown = render(|out| write_full(out, &painter, &result, "s", 53, true, true, true));
         assert!(shown.contains("AUTHORITY") && shown.contains("ADDITIONAL"));
 
-        let hidden = render(|out| write_full(out, &painter, &result, "s", 53, false, false));
+        let hidden = render(|out| write_full(out, &painter, &result, "s", 53, false, false, true));
         assert!(!hidden.contains("AUTHORITY") && !hidden.contains("ADDITIONAL"));
     }
 
@@ -218,7 +220,7 @@ mod tests {
         });
         result.message.header.ad = true;
         let painter = Painter::with_color(false);
-        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true, true));
         assert!(text.contains(" EDNS version 0; flags: do; udp: 1232"));
         assert!(text.contains(" flags: ad"));
     }
@@ -240,7 +242,7 @@ mod tests {
             nsid: None,
         });
         let painter = Painter::with_color(false);
-        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true, true));
         assert!(text.contains("udp: 1232; subnet: 96.112.0.0/24/18"));
     }
 
@@ -259,7 +261,7 @@ mod tests {
             }),
         });
         let painter = Painter::with_color(false);
-        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true, true));
         assert!(text.contains("udp: 1232; nsid: 6c617833 (\"lax3\")"));
     }
 
@@ -339,6 +341,40 @@ mod tests {
         assert!(!text.contains("min"));
     }
 
+    #[test]
+    fn write_full_without_stats_omits_the_status_footer() {
+        let result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
+        let painter = Painter::with_color(false);
+        let text =
+            render(|out| write_full(out, &painter, &result, "8.8.8.8", 53, true, true, false));
+        assert!(text.contains("93.184.216.34"));
+        assert!(!text.contains("NOERROR"));
+        assert!(!text.contains("\u{2500}"));
+        assert!(!text.contains("ms"));
+    }
+
+    #[test]
+    fn write_query_renders_parsed_outgoing_message() {
+        // Build real query bytes, parse them back, render — same path +qr uses.
+        let (bytes, _id) = DnsMessage::build_query(
+            "example.com",
+            RecordType::A,
+            true,
+            Some(&crate::protocol::edns::EdnsOptions {
+                dnssec_ok: true,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let message = DnsMessage::parse(&bytes).unwrap();
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_query(out, &painter, &message, "8.8.8.8", 53));
+        assert!(text.contains("QUERY \u{2192} 8.8.8.8:53"));
+        assert!(text.contains("flags: rd; QUESTION: 1, ADDITIONAL: 1"));
+        assert!(text.contains("example.com.  IN  A"));
+        assert!(text.contains("EDNS version 0; flags: do; udp: 4096"));
+    }
+
     // === format_ttl ===
 
     #[test]
@@ -367,12 +403,80 @@ pub fn write_short<W: Write>(out: &mut W, result: &QueryResult) {
     }
 }
 
+pub fn print_query(message: &crate::protocol::message::DnsMessage, server: &str, port: u16) {
+    let painter = Painter::new();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_query(&mut out, &painter, message, server, port);
+}
+
+/// Render the outgoing query (+qr). The message is the parsed form of the
+/// exact bytes about to go on the wire, so this cannot drift from reality.
+pub fn write_query<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    message: &crate::protocol::message::DnsMessage,
+    server: &str,
+    port: u16,
+) {
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        " {} {} {}:{}",
+        painter.paint(BOLD_WHITE, "QUERY"),
+        painter.paint(DIM, "\u{2192}"),
+        server,
+        port
+    );
+
+    let header = &message.header;
+    let mut flags = Vec::new();
+    if header.rd {
+        flags.push("rd");
+    }
+    if header.cd {
+        flags.push("cd");
+    }
+    let _ = writeln!(
+        out,
+        " {} {}; QUESTION: {}, ADDITIONAL: {}",
+        painter.paint(DIM, "flags:"),
+        flags.join(" "),
+        header.qdcount,
+        header.arcount
+    );
+
+    for q in &message.questions {
+        let _ = writeln!(
+            out,
+            " {}  {}  {}",
+            q.name,
+            q.qclass,
+            painter.paint(BOLD_CYAN, &q.qtype.to_string())
+        );
+    }
+
+    if let Some(ref edns) = message.edns {
+        let flags = if edns.dnssec_ok { "do" } else { "" };
+        let _ = writeln!(
+            out,
+            " {} version {}; flags: {}; udp: {}",
+            painter.paint(DIM, "EDNS"),
+            edns.version,
+            flags,
+            edns.udp_payload_size
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn print_full(
     result: &QueryResult,
     server: &str,
     port: u16,
     show_authority: bool,
     show_additional: bool,
+    show_stats: bool,
 ) {
     let painter = Painter::new();
     let stdout = io::stdout();
@@ -385,6 +489,7 @@ pub fn print_full(
         port,
         show_authority,
         show_additional,
+        show_stats,
     );
 }
 
@@ -397,6 +502,7 @@ pub fn write_full<W: Write>(
     port: u16,
     show_authority: bool,
     show_additional: bool,
+    show_stats: bool,
 ) {
     // Answer section
     if !result.message.answers.is_empty() {
@@ -459,6 +565,9 @@ pub fn write_full<W: Write>(
     }
 
     // Status line
+    if !show_stats {
+        return;
+    }
     let _ = writeln!(out);
     let elapsed_ms = result.elapsed.as_millis();
     let rcode = &result.message.header.rcode;

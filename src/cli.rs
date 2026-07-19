@@ -51,6 +51,8 @@ pub struct Options {
     pub subnet: Option<(std::net::IpAddr, u8)>,
     pub nsid: bool,
     pub retry: u32,
+    pub qr: bool,
+    pub stats: bool,
     pub queries: Vec<(RecordType, String)>,
 }
 
@@ -85,6 +87,8 @@ impl Default for Options {
             subnet: None,
             nsid: false,
             retry: 2,
+            qr: false,
+            stats: true,
             queries: Vec::new(),
         }
     }
@@ -318,6 +322,10 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+bench" => opts.bench = Some(100),
         "+propagation" | "+prop" => opts.propagation = true,
         "+nsid" => opts.nsid = true,
+        "+qr" => opts.qr = true,
+        "+noqr" => opts.qr = false,
+        "+stats" => opts.stats = true,
+        "+nostats" => opts.stats = false,
         "+watch" => opts.watch = Some(2),
         "+doh" => opts.doh = Some(String::new()),
         s if s.starts_with("+timeout=") => {
@@ -508,6 +516,8 @@ pub fn print_usage() {
     {yellow}+doh=URL{reset}        Use DNS-over-HTTPS via custom URL
 
 {bold}DISPLAY:{reset}
+    {yellow}+qr{reset}             Print the outgoing query before sending
+    {yellow}+nostats{reset}        Hide the server/rcode/time/size footer
     {yellow}+color{reset}          Force color output
     {yellow}+nocolor{reset}        Disable color output
     {yellow}+authority{reset}      Show authority section {dim}(default){reset}
@@ -978,5 +988,17 @@ mod tests {
         assert_eq!(parse(&["e.com", "+retry=5"]).retry, 5);
         assert!(parse_err(&["e.com", "+retry=abc"]).contains("invalid retry count"));
         assert!(parse_err(&["e.com", "+retry="]).contains("invalid retry count"));
+    }
+
+    // === +qr and +stats toggles ===
+
+    #[test]
+    fn qr_and_stats_toggles_parse_with_last_wins() {
+        assert!(parse(&["e.com", "+qr"]).qr);
+        assert!(!parse(&["e.com", "+qr", "+noqr"]).qr);
+        assert!(!parse(&["e.com"]).qr);
+        assert!(parse(&["e.com"]).stats);
+        assert!(!parse(&["e.com", "+nostats"]).stats);
+        assert!(parse(&["e.com", "+nostats", "+stats"]).stats);
     }
 }
