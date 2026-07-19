@@ -5,6 +5,7 @@ pub enum DnsError {
     Usage(String),
     Protocol(String),
     Network(String),
+    Timeout(String),
 }
 
 impl DnsError {
@@ -13,6 +14,7 @@ impl DnsError {
             DnsError::Usage(_) => 1,
             DnsError::Protocol(_) => 2,
             DnsError::Network(_) => 9,
+            DnsError::Timeout(_) => 9,
         }
     }
 }
@@ -23,6 +25,7 @@ impl fmt::Display for DnsError {
             DnsError::Usage(msg) => write!(f, "{}", msg),
             DnsError::Protocol(msg) => write!(f, "{}", msg),
             DnsError::Network(msg) => write!(f, "{}", msg),
+            DnsError::Timeout(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -45,6 +48,7 @@ mod tests {
         assert_eq!(DnsError::Usage("x".into()).exit_code(), 1);
         assert_eq!(DnsError::Protocol("x".into()).exit_code(), 2);
         assert_eq!(DnsError::Network("x".into()).exit_code(), 9);
+        assert_eq!(DnsError::Timeout("x".into()).exit_code(), 9);
     }
 
     #[test]

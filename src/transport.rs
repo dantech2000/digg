@@ -58,6 +58,20 @@ pub fn send_query(
     force_tcp: bool,
     timeout: Duration,
 ) -> Result<QueryResult, DnsError> {
+    send_query_with_retries(server, port, query, force_tcp, timeout, 0)
+}
+
+/// Send a query, retrying a timed-out UDP attempt up to `retries` more times
+/// (dig semantics: total attempts = retries + 1). Only timeouts retry —
+/// refused connections, parse failures, and TCP errors fail immediately.
+pub fn send_query_with_retries(
+    server: &str,
+    port: u16,
+    query: &[u8],
+    force_tcp: bool,
+    timeout: Duration,
+    retries: u32,
+) -> Result<QueryResult, DnsError> {
     let addr = format_addr(server, port);
     let start = Instant::now();
 
@@ -65,7 +79,18 @@ pub fn send_query(
         return send_tcp(&addr, query, start, timeout);
     }
 
-    let result = send_udp(&addr, query, start, timeout)?;
+    let mut attempt = 0u32;
+    let result = loop {
+        attempt += 1;
+        match send_udp(&addr, query, start, timeout) {
+            Ok(r) => break r,
+            Err(DnsError::Timeout(_)) if attempt <= retries => continue,
+            Err(DnsError::Timeout(msg)) if attempt > 1 => {
+                return Err(DnsError::Timeout(format!("{} ({} attempts)", msg, attempt)));
+            }
+            Err(e) => return Err(e),
+        }
+    };
 
     if result.message.header.tc {
         let start = Instant::now();
@@ -107,9 +132,22 @@ fn send_udp(
         .map_err(|e| DnsError::Network(format!("failed to send UDP query to {}: {}", addr, e)))?;
 
     let mut resp_buf = vec![0u8; UDP_RECV_BUF];
-    let size = socket
-        .recv(&mut resp_buf)
-        .map_err(|e| DnsError::Network(format!("failed to receive UDP response: {}", e)))?;
+    let size = socket.recv(&mut resp_buf).map_err(|e| {
+        // Socket read timeouts surface as WouldBlock (BSD/macOS) or TimedOut
+        // (Linux); everything else is a real network failure.
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            DnsError::Timeout(format!(
+                "no response from {} within {}s",
+                addr,
+                timeout.as_secs()
+            ))
+        } else {
+            DnsError::Network(format!("failed to receive UDP response: {}", e))
+        }
+    })?;
 
     let elapsed = start.elapsed();
     let message = DnsMessage::parse(&resp_buf[..size])?;
