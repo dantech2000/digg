@@ -28,8 +28,12 @@ lint:
     cargo clippy --all-targets -- -D warnings
 
 # Format + lint + test — mirrors the CI `check` job exactly
-check: fmt lint test
+check: fmt lint test man-check
     cargo build --release
+
+# Verify every CLI flag is documented in the man page
+man-check:
+    ./scripts/man-check.sh
 
 # Coverage summary (requires cargo-llvm-cov; matches the CI ratchet)
 coverage:

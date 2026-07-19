@@ -1,0 +1,210 @@
+.Dd July 19, 2026
+.Dt DIGG 1
+.Os
+.Sh NAME
+.Nm digg
+.Nd modern DNS lookup utility
+.Sh SYNOPSIS
+.Nm
+.Op Cm @server No ...
+.Op Ar name
+.Op Ar type
+.Op Fl x Ar addr
+.Op Fl p Ar port
+.Op Fl c Ar class
+.Op Fl f Ar file
+.Op Cm +option No ...
+.Sh DESCRIPTION
+.Nm
+is a DNS lookup tool in the spirit of
+.Xr dig 1
+with modern defaults: colored human-oriented output, EDNS(0) on by
+default, automatic TCP fallback on truncation, UDP retries, and
+first-class JSON/YAML/TSV output for scripting.
+.Pp
+Positional arguments may appear in any order.
+A bare IP address argument is automatically converted to a reverse PTR
+lookup.
+Multiple
+.Cm @server
+arguments enable comparison mode.
+Multiple
+.Ar type name
+pairs issue multiple queries in one invocation.
+Non-ASCII names are converted to punycode A-labels (IDNA/UTS-46) before
+being sent.
+.Sh ARGUMENTS
+.Bl -tag -width Ds
+.It Cm @server
+DNS server IP or hostname (default: system resolver).
+.It Ar name
+Domain name to query (default:
+.Ql \&. ) .
+.It Ar type
+Record type: A AAAA NS MX CNAME TXT SOA PTR SRV CAA HTTPS SVCB DS RRSIG
+DNSKEY NSEC NSEC3 NSEC3PARAM AXFR ANY, case-insensitive (default: A).
+Any numeric type may be queried with the RFC 3597 syntax
+.Ql TYPE Ns Ar N ,
+e.g.
+.Ql TYPE64512 .
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl x Ar addr
+Reverse DNS lookup: builds the PTR query for an IPv4 or IPv6 address.
+.It Fl p Ar port
+DNS server port (default: 53).
+.It Fl c Ar class
+Query class: IN, CH, HS, ANY, or numeric
+.Ql CLASS Ns Ar N
+(default: IN).
+CHAOS-class queries enable classics such as
+.Ql digg @ns1 -c CH version.bind TXT .
+.It Fl f Ar file
+Batch mode: read queries from a file, one per line
+.Pf ( Ql -
+for stdin).
+Each line may contain a name, a type, and an
+.Cm @server ,
+in any order.
+.It Fl h , Fl -help
+Show usage.
+.It Fl V , Fl -version
+Show version.
+.El
+.Sh QUERY OPTIONS
+.Bl -tag -width Ds
+.It Cm +short
+Terse output: one rdata value per line.
+.It Cm +json , +yaml
+Structured output including timing, transport, and the full message.
+.It Cm +tsv
+Machine-readable output: one answer record per line as
+.Ql name<TAB>ttl<TAB>class<TAB>type<TAB>rdata .
+Field order, separator, and raw-seconds TTL are a stability contract and
+will not change within a major version.
+Tabs, newlines, and backslashes inside rdata are escaped as
+.Ql \et , \en , \e\e .
+.It Cm +compat
+Classic dig-style presentation output for legacy parsers.
+.It Cm +tcp , +notcp
+Force TCP, or force UDP-only.
+.It Cm +recurse , +norecurse
+Enable (default) or disable recursion.
+.It Cm +timeout Ns = Ns Ar N
+Per-try query timeout in seconds (default: 5).
+.It Cm +retry Ns = Ns Ar N
+UDP retries after a timeout (default: 2;
+.Cm +retry=0
+disables).
+Only timeouts retry; other errors fail immediately.
+.It Cm +edns , +noedns
+Enable (default) or disable EDNS(0).
+.It Cm +subnet Ns = Ns Ar IP Ns Op / Ns Ar N
+Send an EDNS Client Subnet option (RFC 7871).
+Default prefix: /24 for IPv4, /56 for IPv6.
+.Cm +subnet=0
+sends the privacy opt-out (source prefix 0), asking the resolver not to
+forward any client subnet.
+The returned scope is shown on the EDNS line.
+.It Cm +nsid
+Request the server identifier (RFC 5001); useful for identifying which
+anycast instance answered.
+.El
+.Sh SECURITY OPTIONS
+.Bl -tag -width Ds
+.It Cm +dnssec
+Request DNSSEC records (sets the DO bit).
+.It Cm +dot
+DNS-over-TLS on port 853.
+.It Cm +doh Ns Op = Ns Ar provider|URL
+DNS-over-HTTPS.
+Known providers: cloudflare (default), google, quad9, opendns, adguard,
+wikimedia.
+Anything else is treated as a custom URL or host.
+.El
+.Sh DISPLAY OPTIONS
+.Bl -tag -width Ds
+.It Cm +qr , +noqr
+Print the outgoing query (destination, flags, question, EDNS) before
+sending.
+.It Cm +stats , +nostats
+Show (default) or hide the server/rcode/time/size footer.
+.It Cm +idnout , +noidnout
+Display internationalized names as Unicode (default: off; machine
+formats always keep A-labels).
+.It Cm +idnin , +noidnin
+Convert (default) or do not convert non-ASCII query names to punycode.
+.It Cm +color , +nocolor
+Force or disable colored output.
+.It Cm +authority , +noauthority
+Show (default) or hide the authority section.
+.It Cm +additional , +noadditional
+Show (default) or hide the additional section.
+.El
+.Sh ADVANCED MODES
+.Bl -tag -width Ds
+.It Cm +trace
+Trace the delegation chain from the root servers.
+.It Cm +bench Ns Op = Ns Ar N
+Benchmark: repeat the query N times (default: 100) and report latency
+statistics with a histogram.
+Retries are disabled during benchmarks.
+.It Cm +propagation , +prop
+Query 10 public resolvers in parallel and report whether answers agree.
+.It Cm +watch Ns Op = Ns Ar N
+Re-query every N seconds (default: 2) and highlight changes; interrupt
+to stop.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width NO_COLOR
+.It Ev NO_COLOR
+When set to a non-empty value, disables colored output (see
+.Lk https://no-color.org ) .
+.It Ev HOME
+Location of the configuration file.
+.El
+.Sh FILES
+.Bl -tag -width ~/.diggrc
+.It Pa ~/.diggrc
+Optional configuration: one option per line, applied before CLI
+arguments (so CLI arguments win).
+Lines starting with
+.Ql #
+are ignored.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+Success (NOERROR).
+.It 1
+Usage error, or the query returned NXDOMAIN.
+.It 2
+Protocol error (malformed or mismatched response), or a non-NOERROR
+rcode other than NXDOMAIN.
+.It 9
+Network error or timeout (all retries exhausted).
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+digg example.com                       # A record via system resolver
+digg @8.8.8.8 example.com MX           # MX via Google DNS
+digg 8.8.8.8                           # automatic reverse PTR lookup
+digg example.com +short                # terse output
+digg example.com +tsv | awk -F'\et' '{print $5}'
+digg example.com +dnssec +trace        # delegation chain with DNSSEC
+digg cdn.example.com +subnet=203.0.113.0/24   # geo-DNS debugging
+digg @1.1.1.1 example.com +nsid        # which anycast node answered?
+digg @ns1.example.com -c CH version.bind TXT  # server fingerprint
+digg example.com @8.8.8.8 @1.1.1.1     # compare resolvers
+digg example.com +prop                 # propagation check
+digg -f domains.txt +tsv               # batch to a pipeline
+digg AXFR example.com @ns1.example.com # zone transfer
+.Ed
+.Sh SEE ALSO
+.Xr dig 1 ,
+.Xr drill 1 ,
+.Xr host 1
+.Pp
+RFC 1035 (DNS), RFC 3597 (unknown RR types), RFC 5001 (NSID),
+RFC 6891 (EDNS), RFC 7871 (Client Subnet), RFC 9460 (SVCB/HTTPS).
