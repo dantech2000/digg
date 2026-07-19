@@ -423,6 +423,116 @@ mod tests {
         assert_eq!(render(|out| write_tsv(out, &result)), "");
     }
 
+    // === Compat (dig-style) golden tests ===
+
+    fn compat_all() -> CompatOptions {
+        CompatOptions {
+            show_authority: true,
+            show_additional: true,
+            show_stats: true,
+        }
+    }
+
+    #[test]
+    fn write_compat_golden_matches_dig_shape() {
+        let mut result = fixture_result(vec![a_record("example.com.", 3600, [93, 184, 216, 34])]);
+        result
+            .message
+            .questions
+            .push(crate::protocol::question::Question::new_with_class(
+                "example.com.",
+                RecordType::A,
+                RecordClass::IN,
+            ));
+        result.message.header.qdcount = 1;
+        result.message.header.rd = true;
+        result.message.header.ra = true;
+        // 2026-07-19 10:00:00 UTC
+        let text =
+            render(|out| write_compat(out, &result, "8.8.8.8", 53, 1_784_455_200, &compat_all()));
+        assert!(text.starts_with(&format!(
+            "; <<>> digg {} <<>> example.com\n",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(text.contains(";; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4660"));
+        assert!(
+            text.contains(";; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0")
+        );
+        assert!(text.contains(";; QUESTION SECTION:\n;example.com.\t\t\tIN\tA\n"));
+        assert!(text.contains(";; ANSWER SECTION:\nexample.com.\t\t3600\tIN\tA\t93.184.216.34\n"));
+        assert!(text.contains(";; Query time: 23 msec"));
+        assert!(text.contains(";; SERVER: 8.8.8.8#53(8.8.8.8) (UDP)"));
+        assert!(text.contains(";; WHEN: Sun Jul 19 10:00:00 UTC 2026"));
+        assert!(text.contains(";; MSG SIZE  rcvd: 56"));
+        assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn write_compat_edns_pseudosection_matches_dig_punctuation() {
+        let mut result = fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])]);
+        result.message.edns = Some(crate::protocol::edns::EdnsInfo {
+            udp_payload_size: 1232,
+            extended_rcode: 0,
+            version: 0,
+            dnssec_ok: false,
+            subnet: None,
+            nsid: None,
+        });
+        let text = render(|out| write_compat(out, &result, "s", 53, 0, &compat_all()));
+        // dig prints the semicolon even with no flags set: "flags:; udp:"
+        assert!(text.contains("; EDNS: version: 0, flags:; udp: 1232"));
+
+        result.message.edns.as_mut().unwrap().dnssec_ok = true;
+        let text = render(|out| write_compat(out, &result, "s", 53, 0, &compat_all()));
+        assert!(text.contains("; EDNS: version: 0, flags: do; udp: 1232"));
+    }
+
+    #[test]
+    fn write_compat_parses_with_classic_awk_recipe() {
+        // The canonical scripting pattern: extract rdata from the answer
+        // section by splitting on whitespace.
+        let result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        let text = render(|out| write_compat(out, &result, "s", 53, 0, &compat_all()));
+        let in_answer = text
+            .lines()
+            .skip_while(|l| !l.starts_with(";; ANSWER SECTION:"))
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .collect::<Vec<_>>();
+        let fields: Vec<&str> = in_answer[0].split_whitespace().collect();
+        assert_eq!(fields, vec!["example.com.", "60", "IN", "A", "1.2.3.4"]);
+    }
+
+    #[test]
+    fn write_compat_honors_section_and_stats_toggles() {
+        let mut result = fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])]);
+        result
+            .message
+            .authority
+            .push(a_record("ns.e.com.", 60, [5, 6, 7, 8]));
+        let none = CompatOptions {
+            show_authority: false,
+            show_additional: false,
+            show_stats: false,
+        };
+        let text = render(|out| write_compat(out, &result, "s", 53, 0, &none));
+        assert!(!text.contains("AUTHORITY SECTION"));
+        assert!(!text.contains("Query time"));
+        assert!(!text.contains("WHEN:"));
+    }
+
+    #[test]
+    fn dig_when_formats_known_timestamps() {
+        assert_eq!(format_dig_when(0), "Thu Jan  1 00:00:00 UTC 1970");
+        // 2000-02-29 (leap day) 12:34:56 UTC = 951827696
+        assert_eq!(format_dig_when(951_827_696), "Tue Feb 29 12:34:56 UTC 2000");
+        // 2026-07-19 10:00:00 UTC
+        assert_eq!(
+            format_dig_when(1_784_455_200),
+            "Sun Jul 19 10:00:00 UTC 2026"
+        );
+    }
+
     // === format_ttl ===
 
     #[test]
@@ -674,6 +784,164 @@ fn escape_tsv_field(value: &str) -> String {
         }
     }
     escaped
+}
+
+// === Classic dig-compatible output (+compat) ===
+
+pub fn print_compat(result: &QueryResult, server: &str, port: u16, opts: &CompatOptions) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    write_compat(&mut out, result, server, port, when, opts);
+}
+
+pub struct CompatOptions {
+    pub show_authority: bool,
+    pub show_additional: bool,
+    pub show_stats: bool,
+}
+
+/// Render a response in classic BIND dig presentation format so existing
+/// dig-parsing scripts work unmodified. Never colored: parse-compat is the
+/// point. Targets "parses the same", not byte-for-byte dig parity.
+pub fn write_compat<W: Write>(
+    out: &mut W,
+    result: &QueryResult,
+    server: &str,
+    port: u16,
+    when_unix: u64,
+    opts: &CompatOptions,
+) {
+    let msg = &result.message;
+    let header = &msg.header;
+
+    let _ = writeln!(
+        out,
+        "; <<>> digg {} <<>> {}",
+        env!("CARGO_PKG_VERSION"),
+        msg.questions
+            .first()
+            .map(|q| q.name.trim_end_matches('.').to_string())
+            .unwrap_or_default()
+    );
+    let _ = writeln!(
+        out,
+        ";; ->>HEADER<<- opcode: QUERY, status: {}, id: {}",
+        header.rcode, header.id
+    );
+
+    let mut flags = Vec::new();
+    for (set, name) in [
+        (header.qr, "qr"),
+        (header.aa, "aa"),
+        (header.tc, "tc"),
+        (header.rd, "rd"),
+        (header.ra, "ra"),
+        (header.ad, "ad"),
+        (header.cd, "cd"),
+    ] {
+        if set {
+            flags.push(name);
+        }
+    }
+    let _ = writeln!(
+        out,
+        ";; flags: {}; QUERY: {}, ANSWER: {}, AUTHORITY: {}, ADDITIONAL: {}",
+        flags.join(" "),
+        header.qdcount,
+        header.ancount,
+        header.nscount,
+        header.arcount
+    );
+
+    if let Some(ref edns) = msg.edns {
+        let _ = writeln!(out);
+        let _ = writeln!(out, ";; OPT PSEUDOSECTION:");
+        let do_flag = if edns.dnssec_ok { " do" } else { "" };
+        let _ = writeln!(
+            out,
+            "; EDNS: version: {}, flags:{}; udp: {}",
+            edns.version, do_flag, edns.udp_payload_size
+        );
+    }
+
+    if !msg.questions.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, ";; QUESTION SECTION:");
+        for q in &msg.questions {
+            let _ = writeln!(out, ";{}\t\t\t{}\t{}", q.name, q.qclass, q.qtype);
+        }
+    }
+
+    let sections: [(&str, &[ResourceRecord], bool); 3] = [
+        ("ANSWER", &msg.answers, true),
+        ("AUTHORITY", &msg.authority, opts.show_authority),
+        ("ADDITIONAL", &msg.additional, opts.show_additional),
+    ];
+    for (title, records, shown) in sections {
+        if !shown || records.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out);
+        let _ = writeln!(out, ";; {} SECTION:", title);
+        for rr in records {
+            let _ = writeln!(
+                out,
+                "{}\t\t{}\t{}\t{}\t{}",
+                rr.name, rr.ttl, rr.rclass, rr.rtype, rr.rdata
+            );
+        }
+    }
+
+    if opts.show_stats {
+        let _ = writeln!(out);
+        let _ = writeln!(out, ";; Query time: {} msec", result.elapsed.as_millis());
+        let _ = writeln!(
+            out,
+            ";; SERVER: {}#{}({}) ({})",
+            server, port, server, result.protocol
+        );
+        let _ = writeln!(out, ";; WHEN: {}", format_dig_when(when_unix));
+        let _ = writeln!(out, ";; MSG SIZE  rcvd: {}", result.bytes);
+    }
+}
+
+/// Format a unix timestamp the way dig prints ;; WHEN:, in UTC.
+/// (Civil-from-days algorithm; avoids a chrono dependency.)
+fn format_dig_when(epoch: u64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let days = (epoch / 86400) as i64;
+    let secs = epoch % 86400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    let weekday = ((days % 7 + 11) % 7) as usize; // 1970-01-01 was a Thursday
+
+    format!(
+        "{} {} {:2} {:02}:{:02}:{:02} UTC {}",
+        WEEKDAYS[weekday],
+        MONTHS[(month - 1) as usize],
+        day,
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+        year
+    )
 }
 
 // === JSON output ===
