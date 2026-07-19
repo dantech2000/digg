@@ -4,7 +4,7 @@ complete -c digg -f
 # +options
 for flag in short json yaml tsv compat qr noqr stats nostats color nocolor \
     tcp notcp recurse norecurse authority noauthority additional noadditional \
-    trace dnssec dot edns noedns nsid idnin noidnin idnout noidnout \
+    trace dnssec validate dot edns noedns nsid idnin noidnin idnout noidnout \
     propagation prop bench watch doh
     complete -c digg -a "+$flag"
 end

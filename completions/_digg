@@ -17,6 +17,7 @@ _digg() {
         '+additional[show additional section]' '+noadditional[hide additional section]'
         '+trace[trace delegation from root]'
         '+dnssec[request DNSSEC records]'
+        '+validate[validate the DNSSEC chain locally]'
         '+dot[DNS-over-TLS]'
         '+edns[enable EDNS]' '+noedns[disable EDNS]'
         '+nsid[request server identifier]'
