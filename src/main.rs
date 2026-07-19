@@ -42,10 +42,16 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
 
     // Build EDNS options
     let edns = if opts.edns {
-        Some(EdnsOptions {
+        let mut edns_opts = EdnsOptions {
             dnssec_ok: opts.dnssec,
             ..EdnsOptions::default()
-        })
+        };
+        if let Some((addr, prefix)) = opts.subnet {
+            edns_opts
+                .options
+                .push(protocol::edns::client_subnet_option(addr, prefix));
+        }
+        Some(edns_opts)
     } else {
         None
     };
@@ -133,7 +139,8 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
     // Propagation mode
     if opts.propagation {
         let (qtype, name) = &opts.queries[0];
-        let results = propagation::check_propagation(name, *qtype, timeout, opts.dnssec);
+        let results =
+            propagation::check_propagation(name, *qtype, timeout, edns.clone().unwrap_or_default());
         output::print_propagation(&results, name, &qtype.to_string());
         return Ok(0);
     }

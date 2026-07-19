@@ -48,6 +48,7 @@ pub struct Options {
     pub axfr: bool,
     pub propagation: bool,
     pub watch: Option<u64>,
+    pub subnet: Option<(std::net::IpAddr, u8)>,
     pub queries: Vec<(RecordType, String)>,
 }
 
@@ -79,6 +80,7 @@ impl Default for Options {
             axfr: false,
             propagation: false,
             watch: None,
+            subnet: None,
             queries: Vec::new(),
         }
     }
@@ -200,6 +202,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
     // Detect AXFR
     if opts.qtype == RecordType::AXFR {
         opts.axfr = true;
+    }
+
+    if opts.subnet.is_some() && !opts.edns {
+        return Err(DnsError::Usage(
+            "+subnet requires EDNS; remove +noedns".into(),
+        ));
     }
 
     Ok(opts)
@@ -333,11 +341,55 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         s if s.starts_with("+doh=") => {
             opts.doh = Some(s[5..].to_string());
         }
+        s if s.starts_with("+subnet=") => {
+            opts.subnet = Some(parse_subnet(&s[8..])?);
+        }
         _ => {
             return Err(DnsError::Usage(format!("unknown option: {}", arg)));
         }
     }
     Ok(())
+}
+
+/// Parse `+subnet=` values: an IP with optional /prefix (defaults: /24 for
+/// IPv4, /56 for IPv6, matching dig), or `0` as shorthand for the RFC 7871
+/// privacy opt-out `0.0.0.0/0`.
+fn parse_subnet(spec: &str) -> Result<(std::net::IpAddr, u8), DnsError> {
+    if spec == "0" {
+        return Ok((std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0));
+    }
+
+    let (addr_str, prefix_str) = match spec.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (spec, None),
+    };
+
+    let addr: std::net::IpAddr = addr_str
+        .parse()
+        .map_err(|_| DnsError::Usage(format!("invalid subnet address: {}", spec)))?;
+
+    let max_prefix: u8 = if addr.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix_str {
+        Some(p) => p
+            .parse::<u8>()
+            .ok()
+            .filter(|&n| n <= max_prefix)
+            .ok_or_else(|| {
+                DnsError::Usage(format!(
+                    "invalid subnet prefix: {} (max /{} for this family)",
+                    spec, max_prefix
+                ))
+            })?,
+        None => {
+            if addr.is_ipv4() {
+                24
+            } else {
+                56
+            }
+        }
+    };
+
+    Ok((addr, prefix))
 }
 
 /// True when a token is shaped like RFC 3597 `TYPE<N>` syntax (used to
@@ -426,6 +478,8 @@ pub fn print_usage() {
     {yellow}+timeout=N{reset}      Query timeout in seconds {dim}(default: 5){reset}
     {yellow}+edns{reset}           Enable EDNS(0) {dim}(default){reset}
     {yellow}+noedns{reset}         Disable EDNS(0)
+    {yellow}+subnet=IP[/N]{reset}  Send EDNS Client Subnet {dim}(RFC 7871; default /24, /56 v6){reset}
+    {yellow}+subnet=0{reset}       Ask the resolver not to forward any subnet
 
 {bold}SECURITY:{reset}
     {yellow}+dnssec{reset}         Request DNSSEC records (sets DO bit)
@@ -828,5 +882,61 @@ mod tests {
     fn class_flag_rejects_unknown_and_missing_values() {
         assert!(parse_err(&["-c", "XX"]).contains("invalid class"));
         assert!(parse_err(&["-c"]).contains("requires a class"));
+    }
+
+    // === EDNS Client Subnet (+subnet) ===
+
+    #[test]
+    fn subnet_parses_with_and_without_prefix() {
+        use std::net::IpAddr;
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        assert_eq!(
+            parse(&["e.com", "+subnet=192.0.2.1"]).subnet,
+            Some((v4, 24))
+        );
+        assert_eq!(
+            parse(&["e.com", "+subnet=192.0.2.1/16"]).subnet,
+            Some((v4, 16))
+        );
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            parse(&["e.com", "+subnet=2001:db8::1"]).subnet,
+            Some((v6, 56))
+        );
+        assert_eq!(
+            parse(&["e.com", "+subnet=2001:db8::1/48"]).subnet,
+            Some((v6, 48))
+        );
+    }
+
+    #[test]
+    fn subnet_zero_is_the_privacy_opt_out() {
+        use std::net::{IpAddr, Ipv4Addr};
+        assert_eq!(
+            parse(&["e.com", "+subnet=0"]).subnet,
+            Some((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+        );
+        assert_eq!(
+            parse(&["e.com", "+subnet=0.0.0.0/0"]).subnet,
+            Some((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+        );
+    }
+
+    #[test]
+    fn subnet_rejects_bad_addresses_and_prefixes() {
+        assert!(parse_err(&["e.com", "+subnet=notanip"]).contains("invalid subnet address"));
+        assert!(parse_err(&["e.com", "+subnet=1.2.3.4/33"]).contains("invalid subnet prefix"));
+        assert!(parse_err(&["e.com", "+subnet=2001:db8::/129"]).contains("invalid subnet prefix"));
+        assert!(parse_err(&["e.com", "+subnet="]).contains("invalid subnet address"));
+    }
+
+    #[test]
+    fn subnet_conflicts_with_noedns_in_either_order() {
+        assert!(
+            parse_err(&["e.com", "+subnet=1.2.3.4", "+noedns"]).contains("+subnet requires EDNS")
+        );
+        assert!(
+            parse_err(&["e.com", "+noedns", "+subnet=1.2.3.4"]).contains("+subnet requires EDNS")
+        );
     }
 }
