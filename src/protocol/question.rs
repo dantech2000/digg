@@ -11,6 +11,7 @@ pub struct Question {
 }
 
 impl Question {
+    #[cfg(test)]
     pub fn new(name: &str, qtype: RecordType) -> Self {
         Self::new_with_class(name, qtype, RecordClass::IN)
     }
