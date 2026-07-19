@@ -40,6 +40,7 @@ pub struct Options {
     pub json: bool,
     pub yaml: bool,
     pub tsv: bool,
+    pub compat: bool,
     pub bench: Option<usize>,
     pub batch_file: Option<String>,
     pub dnssec: bool,
@@ -77,6 +78,7 @@ impl Default for Options {
             json: false,
             yaml: false,
             tsv: false,
+            compat: false,
             bench: None,
             batch_file: None,
             dnssec: false,
@@ -319,6 +321,7 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+json" => opts.json = true,
         "+yaml" => opts.yaml = true,
         "+tsv" => opts.tsv = true,
+        "+compat" => opts.compat = true,
         "+dot" => opts.dot = true,
         "+edns" => opts.edns = true,
         "+noedns" => opts.edns = false,
@@ -500,6 +503,7 @@ pub fn print_usage() {
     {yellow}+json{reset}           JSON output
     {yellow}+yaml{reset}           YAML output
     {yellow}+tsv{reset}            Tab-separated output: name ttl class type rdata
+    {yellow}+compat{reset}         Classic dig-style output for legacy parsers
     {yellow}+tcp{reset}            Force TCP transport
     {yellow}+notcp{reset}          Force UDP transport
     {yellow}+recurse{reset}        Enable recursion {dim}(default){reset}
@@ -1012,5 +1016,11 @@ mod tests {
     fn tsv_flag_parses() {
         assert!(parse(&["e.com", "+tsv"]).tsv);
         assert!(!parse(&["e.com"]).tsv);
+    }
+
+    #[test]
+    fn compat_flag_parses() {
+        assert!(parse(&["e.com", "+compat"]).compat);
+        assert!(!parse(&["e.com"]).compat);
     }
 }

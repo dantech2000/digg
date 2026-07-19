@@ -223,6 +223,17 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             output::print_tsv(&result);
         } else if opts.short {
             output::print_short(&result);
+        } else if opts.compat {
+            output::print_compat(
+                &result,
+                &server,
+                opts.port,
+                &output::CompatOptions {
+                    show_authority: opts.show_authority,
+                    show_additional: opts.show_additional,
+                    show_stats: opts.stats,
+                },
+            );
         } else {
             output::print_full(
                 &result,
