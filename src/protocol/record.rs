@@ -281,7 +281,11 @@ impl fmt::Display for RData {
             }
             RData::OPT(_) => write!(f, "<OPT>"),
             RData::Unknown(data) => {
-                write!(f, "\\# {} {}", data.len(), hex(data))
+                if data.is_empty() {
+                    write!(f, "\\# 0")
+                } else {
+                    write!(f, "\\# {} {}", data.len(), hex(data))
+                }
             }
         }
     }
@@ -1145,11 +1149,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_rdata_empty_pins_current_trailing_space() {
-        // RFC 3597 presentation for empty RDATA is "\# 0" with no trailing
-        // space; current output has one. Pinned deliberately — fix tracked
-        // with the TYPE<N> query work (issue #37).
-        assert_eq!(RData::Unknown(vec![]).to_string(), "\\# 0 ");
+    fn unknown_rdata_empty_renders_rfc3597_without_trailing_space() {
+        assert_eq!(RData::Unknown(vec![]).to_string(), "\\# 0");
     }
 
     // === Category predicates ===

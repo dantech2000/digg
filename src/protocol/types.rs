@@ -84,7 +84,15 @@ impl RecordType {
     }
 
     pub fn parse_name(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
+        let upper = s.to_uppercase();
+        // RFC 3597 TYPE<N> syntax for arbitrary numeric types. Known numbers
+        // normalize to their mnemonic variant so display stays consistent.
+        if let Some(num) = upper.strip_prefix("TYPE") {
+            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+                return num.parse::<u16>().ok().map(RecordType::from_u16);
+            }
+        }
+        match upper.as_str() {
             "A" => Some(RecordType::A),
             "AAAA" => Some(RecordType::AAAA),
             "NS" => Some(RecordType::NS),
@@ -236,5 +244,51 @@ impl fmt::Display for Rcode {
             Rcode::BadVers => write!(f, "BADVERS"),
             Rcode::Unknown(n) => write!(f, "RCODE{}", n),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecordType;
+
+    #[test]
+    fn type_n_syntax_parses_arbitrary_numeric_types() {
+        assert_eq!(
+            RecordType::parse_name("TYPE64512"),
+            Some(RecordType::Unknown(64512))
+        );
+        assert_eq!(
+            RecordType::parse_name("type64512"),
+            Some(RecordType::Unknown(64512))
+        );
+        assert_eq!(
+            RecordType::parse_name("TYPE0"),
+            Some(RecordType::Unknown(0))
+        );
+        assert_eq!(
+            RecordType::parse_name("TYPE65535"),
+            Some(RecordType::Unknown(65535))
+        );
+    }
+
+    #[test]
+    fn type_n_syntax_normalizes_known_numbers_to_mnemonics() {
+        assert_eq!(RecordType::parse_name("TYPE1"), Some(RecordType::A));
+        assert_eq!(RecordType::parse_name("TYPE16"), Some(RecordType::TXT));
+        assert_eq!(RecordType::parse_name("type65"), Some(RecordType::HTTPS));
+    }
+
+    #[test]
+    fn type_n_syntax_rejects_out_of_range_and_malformed() {
+        assert_eq!(RecordType::parse_name("TYPE65536"), None);
+        assert_eq!(RecordType::parse_name("TYPE70000"), None);
+        assert_eq!(RecordType::parse_name("TYPE"), None);
+        assert_eq!(RecordType::parse_name("TYPE12X"), None);
+        assert_eq!(RecordType::parse_name("TYPE-1"), None);
+    }
+
+    #[test]
+    fn unknown_types_display_as_type_n() {
+        assert_eq!(RecordType::Unknown(64512).to_string(), "TYPE64512");
     }
 }

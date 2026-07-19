@@ -167,4 +167,11 @@ mod tests {
     fn batch_file_missing_is_a_usage_error() {
         assert!(read_batch_queries("/nonexistent/digg-batch.txt").is_err());
     }
+
+    #[test]
+    fn batch_line_accepts_type_n_syntax() {
+        let q = parse_batch_line("example.com TYPE64512");
+        assert_eq!(q.qtype, RecordType::Unknown(64512));
+        assert_eq!(q.name, "example.com");
+    }
 }
