@@ -21,3 +21,29 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
       - run: cargo build --release
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Ratchet, not a target: the threshold tracks the real floor and is
+      # bumped in the same PR that raises coverage. Never set it above
+      # what the suite actually measures.
+      - name: Coverage (fail under 60% lines)
+        run: cargo llvm-cov --fail-under-lines 60 --summary-only 2>&1 | tee coverage.txt
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo '### Coverage'
+            echo '```'
+            grep -E '^(Filename|-|[a-z]|protocol/|TOTAL)' coverage.txt || cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
