@@ -38,6 +38,10 @@ cask "digg" do
   end
 
   binary "digg"
+  manpage "digg.1"
+  binary "completions/digg.bash", target: "#{HOMEBREW_PREFIX}/etc/bash_completion.d/digg"
+  binary "completions/_digg", target: "#{HOMEBREW_PREFIX}/share/zsh/site-functions/_digg"
+  binary "completions/digg.fish", target: "#{HOMEBREW_PREFIX}/share/fish/vendor_completions.d/digg.fish"
 
   # The release binary is not Developer ID-signed. Match the other CLI casks
   # in this tap by clearing the download quarantine after Homebrew stages it.
