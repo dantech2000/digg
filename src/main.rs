@@ -7,6 +7,8 @@ mod dnssec;
 mod doh;
 mod dot;
 mod error;
+#[cfg(test)]
+mod fuzz_tests;
 mod idn;
 mod output;
 mod propagation;
