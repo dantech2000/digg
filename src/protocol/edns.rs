@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::net::IpAddr;
 
+/// EDNS option code for NSID (RFC 5001).
+pub const OPTION_NSID: u16 = 3;
 /// EDNS option code for Client Subnet (RFC 7871).
 pub const OPTION_CLIENT_SUBNET: u16 = 8;
 
@@ -89,6 +91,35 @@ pub fn encode_opt_record(opts: &EdnsOptions) -> Vec<u8> {
     buf
 }
 
+/// A server identifier returned via the NSID option (RFC 5001). Operators
+/// usually encode a printable instance name, but the payload is opaque
+/// bytes, so both renderings are kept.
+#[derive(Debug, Clone, Serialize)]
+pub struct Nsid {
+    pub hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl std::fmt::Display for Nsid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.text {
+            Some(text) => write!(f, "{} (\"{}\")", self.hex, text),
+            None => write!(f, "{}", self.hex),
+        }
+    }
+}
+
+fn parse_nsid(data: &[u8]) -> Nsid {
+    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+    let text = if !data.is_empty() && data.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+        Some(String::from_utf8_lossy(data).to_string())
+    } else {
+        None
+    };
+    Nsid { hex, text }
+}
+
 /// A Client Subnet option parsed from a response (RFC 7871 §6).
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientSubnet {
@@ -117,6 +148,8 @@ pub struct EdnsInfo {
     pub dnssec_ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subnet: Option<ClientSubnet>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nsid: Option<Nsid>,
 }
 
 /// Parse EDNS info from an OPT record's raw fields.
@@ -130,6 +163,7 @@ pub fn decode_opt_record(class_val: u16, ttl_val: u32, rdata: &[u8]) -> EdnsInfo
         version: ttl_bytes[1],
         dnssec_ok: ttl_bytes[2] & 0x80 != 0,
         subnet: None,
+        nsid: None,
     };
 
     let mut pos = 0;
@@ -140,8 +174,10 @@ pub fn decode_opt_record(class_val: u16, ttl_val: u32, rdata: &[u8]) -> EdnsInfo
         if pos + len > rdata.len() {
             break; // malformed option: stop parsing rather than misread
         }
-        if code == OPTION_CLIENT_SUBNET {
-            info.subnet = parse_client_subnet(&rdata[pos..pos + len]);
+        match code {
+            OPTION_CLIENT_SUBNET => info.subnet = parse_client_subnet(&rdata[pos..pos + len]),
+            OPTION_NSID => info.nsid = Some(parse_nsid(&rdata[pos..pos + len])),
+            _ => {}
         }
         pos += len;
     }
@@ -257,5 +293,39 @@ mod tests {
         ];
         let info = decode_opt_record(512, 0, &rdata);
         assert!(info.subnet.is_some());
+    }
+
+    #[test]
+    fn nsid_option_parses_printable_and_binary_payloads() {
+        // Printable payload: hex plus quoted text.
+        let rdata = [0x00, 0x03, 0x00, 0x04, b'l', b'a', b'x', b'3'];
+        let info = decode_opt_record(1232, 0, &rdata);
+        let nsid = info.nsid.expect("nsid parsed");
+        assert_eq!(nsid.hex, "6c617833");
+        assert_eq!(nsid.text.as_deref(), Some("lax3"));
+        assert_eq!(nsid.to_string(), "6c617833 (\"lax3\")");
+
+        // Binary payload: hex only.
+        let rdata = [0x00, 0x03, 0x00, 0x02, 0x00, 0xFF];
+        let info = decode_opt_record(1232, 0, &rdata);
+        let nsid = info.nsid.expect("nsid parsed");
+        assert_eq!(nsid.hex, "00ff");
+        assert_eq!(nsid.text, None);
+        assert_eq!(nsid.to_string(), "00ff");
+    }
+
+    #[test]
+    fn nsid_request_option_encodes_with_empty_payload() {
+        let opts = EdnsOptions {
+            options: vec![EdnsOption {
+                code: OPTION_NSID,
+                data: vec![],
+            }],
+            ..EdnsOptions::default()
+        };
+        let encoded = encode_opt_record(&opts);
+        let rdlength = u16::from_be_bytes([encoded[9], encoded[10]]);
+        assert_eq!(rdlength, 4); // option code + zero length, no payload
+        assert_eq!(&encoded[11..], &[0x00, 0x03, 0x00, 0x00]);
     }
 }

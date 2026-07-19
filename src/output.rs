@@ -214,6 +214,7 @@ mod tests {
             version: 0,
             dnssec_ok: true,
             subnet: None,
+            nsid: None,
         });
         result.message.header.ad = true;
         let painter = Painter::with_color(false);
@@ -236,10 +237,30 @@ mod tests {
                 scope_prefix: 18,
                 address: "96.112.0.0".to_string(),
             }),
+            nsid: None,
         });
         let painter = Painter::with_color(false);
         let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
         assert!(text.contains("udp: 1232; subnet: 96.112.0.0/24/18"));
+    }
+
+    #[test]
+    fn write_full_appends_returned_nsid() {
+        let mut result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        result.message.edns = Some(crate::protocol::edns::EdnsInfo {
+            udp_payload_size: 1232,
+            extended_rcode: 0,
+            version: 0,
+            dnssec_ok: false,
+            subnet: None,
+            nsid: Some(crate::protocol::edns::Nsid {
+                hex: "6c617833".to_string(),
+                text: Some("lax3".to_string()),
+            }),
+        });
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true));
+        assert!(text.contains("udp: 1232; nsid: 6c617833 (\"lax3\")"));
     }
 
     #[test]
@@ -407,14 +428,20 @@ pub fn write_full<W: Write>(
             .as_ref()
             .map(|s| format!("; subnet: {}", s))
             .unwrap_or_default();
+        let nsid = edns
+            .nsid
+            .as_ref()
+            .map(|n| format!("; nsid: {}", n))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            " {} version {}; flags: {}; udp: {}{}",
+            " {} version {}; flags: {}; udp: {}{}{}",
             painter.paint(DIM, "EDNS"),
             edns.version,
             flags,
             edns.udp_payload_size,
-            subnet
+            subnet,
+            nsid
         );
     }
 

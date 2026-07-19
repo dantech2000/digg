@@ -51,6 +51,12 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
                 .options
                 .push(protocol::edns::client_subnet_option(addr, prefix));
         }
+        if opts.nsid {
+            edns_opts.options.push(protocol::edns::EdnsOption {
+                code: protocol::edns::OPTION_NSID,
+                data: Vec::new(),
+            });
+        }
         Some(edns_opts)
     } else {
         None
