@@ -348,6 +348,12 @@ pub struct ResourceRecord {
     pub rclass: RecordClass,
     pub ttl: u32,
     pub rdata: RData,
+    /// Raw RDATA bytes as received. DNSSEC validation needs the exact wire
+    /// form (e.g. DNSKEY key-tag and DS digests are computed over it).
+    /// Embedded names may be compressed, so name-bearing types must be
+    /// re-encoded from the parsed form instead (see dnssec::canonical_rdata).
+    #[serde(skip)]
+    pub raw_rdata: Vec<u8>,
 }
 
 impl ResourceRecord {
@@ -379,6 +385,7 @@ impl ResourceRecord {
                 rclass,
                 ttl,
                 rdata,
+                raw_rdata: buf[rdata_start..rdata_start + rdlength].to_vec(),
             },
             total_consumed,
         ))

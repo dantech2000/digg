@@ -115,6 +115,13 @@ anycast instance answered.
 .Bl -tag -width Ds
 .It Cm +dnssec
 Request DNSSEC records (sets the DO bit).
+.It Cm +validate
+Validate the DNSSEC chain of trust locally, from the answer's signing
+zone up to the built-in IANA root anchors, without trusting the
+resolver's AD bit.
+Reports each link and an overall SECURE, INSECURE, or BOGUS status.
+Implies
+.Cm +dnssec .
 .It Cm +dot
 DNS-over-TLS on port 853.
 .It Cm +doh Ns Op = Ns Ar provider|URL

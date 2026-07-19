@@ -160,6 +160,7 @@ mod tests {
             rclass: RecordClass::IN,
             ttl,
             rdata: RData::A(Ipv4Addr::from(addr)),
+            raw_rdata: addr.to_vec(),
         }
     }
 
@@ -444,6 +445,7 @@ mod tests {
             rclass: RecordClass::IN,
             ttl: 60,
             rdata: RData::TXT(vec!["a\tb\nc\\d".to_string()]),
+            raw_rdata: Vec::new(),
         });
         let text = render(|out| write_tsv(out, &result));
         let rdata_field = text.trim_end().split('\t').nth(4).unwrap().to_string();
@@ -775,6 +777,44 @@ pub fn write_full<W: Write>(
         " {} {} {} {} {} {} {} {} {}",
         sep, server_info, sep, rcode_str, sep, timing, sep, size, sep
     );
+}
+
+// === DNSSEC validation output ===
+
+pub fn print_validation(report: &crate::dnssec::ValidationReport) {
+    let painter = Painter::new();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_validation(&mut out, &painter, report);
+}
+
+pub fn write_validation<W: Write>(
+    out: &mut W,
+    painter: &Painter,
+    report: &crate::dnssec::ValidationReport,
+) {
+    use crate::dnssec::ChainStatus;
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "VALIDATION"));
+    for link in &report.links {
+        let mark = if link.ok {
+            painter.paint(BOLD_GREEN, "\u{2713}")
+        } else {
+            painter.paint(BOLD_RED, "\u{2717}")
+        };
+        let _ = writeln!(out, " {} {:<18} {}", mark, link.zone, link.detail);
+    }
+
+    let _ = writeln!(out);
+    let status = match &report.status {
+        ChainStatus::Secure => painter.paint(BOLD_GREEN, "SECURE"),
+        ChainStatus::Insecure(why) => {
+            format!("{} ({})", painter.paint(BOLD_YELLOW, "INSECURE"), why)
+        }
+        ChainStatus::Bogus(why) => format!("{} ({})", painter.paint(BOLD_RED, "BOGUS"), why),
+    };
+    let _ = writeln!(out, " {} {}", painter.paint(DIM, "STATUS:"), status);
 }
 
 // === TSV output ===

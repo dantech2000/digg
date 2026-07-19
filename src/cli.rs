@@ -44,6 +44,7 @@ pub struct Options {
     pub bench: Option<usize>,
     pub batch_file: Option<String>,
     pub dnssec: bool,
+    pub validate: bool,
     pub edns: bool,
     pub doh: Option<String>,
     pub dot: bool,
@@ -84,6 +85,7 @@ impl Default for Options {
             bench: None,
             batch_file: None,
             dnssec: false,
+            validate: false,
             edns: true,
             doh: None,
             dot: false,
@@ -238,6 +240,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         ));
     }
 
+    if opts.validate && !opts.edns {
+        return Err(DnsError::Usage(
+            "+validate requires EDNS; remove +noedns".into(),
+        ));
+    }
+
     if opts.nsid && !opts.edns {
         return Err(DnsError::Usage(
             "+nsid requires EDNS; remove +noedns".into(),
@@ -334,6 +342,10 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+noadditional" => opts.show_additional = false,
         "+trace" => opts.trace = true,
         "+dnssec" => opts.dnssec = true,
+        "+validate" => {
+            opts.validate = true;
+            opts.dnssec = true;
+        }
         "+json" => opts.json = true,
         "+yaml" => opts.yaml = true,
         "+tsv" => opts.tsv = true,
@@ -539,6 +551,7 @@ pub fn print_usage() {
 
 {bold}SECURITY:{reset}
     {yellow}+dnssec{reset}         Request DNSSEC records (sets DO bit)
+    {yellow}+validate{reset}       Validate the DNSSEC chain of trust locally
     {yellow}+dot{reset}            Use DNS-over-TLS (port 853)
     {yellow}+doh{reset}            Use DNS-over-HTTPS {dim}(Cloudflare){reset}
     {yellow}+doh=NAME{reset}       DoH via a known provider: {providers}
@@ -1090,5 +1103,15 @@ mod tests {
         assert!(parse(&["e.com", "+idnout"]).idn_out);
         assert!(!parse(&["e.com", "+idnout", "+noidnout"]).idn_out);
         assert!(!parse(&["e.com"]).idn_out);
+    }
+
+    // === +validate ===
+
+    #[test]
+    fn validate_implies_dnssec_and_needs_edns() {
+        let opts = parse(&["e.com", "+validate"]);
+        assert!(opts.validate);
+        assert!(opts.dnssec);
+        assert!(parse_err(&["e.com", "+validate", "+noedns"]).contains("+validate requires EDNS"));
     }
 }

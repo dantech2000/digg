@@ -3,6 +3,7 @@ mod batch;
 mod bench;
 mod cli;
 mod compare;
+mod dnssec;
 mod doh;
 mod dot;
 mod error;
@@ -252,6 +253,15 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
                 opts.show_additional,
                 opts.stats,
             );
+        }
+
+        if opts.validate && !opts.json && !opts.yaml && !opts.tsv {
+            let report =
+                dnssec::validate(&server, opts.port, &result.message, name, *qtype, timeout)?;
+            output::print_validation(&report);
+            if matches!(report.status, dnssec::ChainStatus::Bogus(_)) {
+                exit_code = exit_code.max(2);
+            }
         }
 
         match result.message.header.rcode {
