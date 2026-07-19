@@ -32,6 +32,22 @@ conventional commits (`fix:` for a patch, `feat:` for a minor, and `!` for a
 breaking change). It maintains a release PR that updates `Cargo.toml` and
 `CHANGELOG.md`; merging that PR creates the tag and starts the release workflow.
 
+## Shell completions
+
+Completion scripts for bash, zsh, and fish live in [`completions/`](completions/)
+and are bundled with release tarballs.
+
+```sh
+# bash (add to ~/.bashrc)
+source /path/to/completions/digg.bash
+
+# zsh (any directory on $fpath)
+cp completions/_digg ~/.zsh/completions/_digg
+
+# fish
+cp completions/digg.fish ~/.config/fish/completions/
+```
+
 ## Usage
 
 ```

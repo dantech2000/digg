@@ -1,0 +1,47 @@
+#compdef digg
+# zsh completion for digg
+
+_digg() {
+    local -a plus_flags dash_flags types servers doh
+    plus_flags=(
+        '+short[terse output, one value per line]'
+        '+json[JSON output]' '+yaml[YAML output]'
+        '+tsv[tab-separated machine-readable output]'
+        '+compat[classic dig-style output]'
+        '+qr[print the outgoing query]' '+noqr[do not print the query]'
+        '+stats[show status footer]' '+nostats[hide status footer]'
+        '+color[force color]' '+nocolor[disable color]'
+        '+tcp[force TCP]' '+notcp[force UDP]'
+        '+recurse[enable recursion]' '+norecurse[disable recursion]'
+        '+authority[show authority section]' '+noauthority[hide authority section]'
+        '+additional[show additional section]' '+noadditional[hide additional section]'
+        '+trace[trace delegation from root]'
+        '+dnssec[request DNSSEC records]'
+        '+dot[DNS-over-TLS]'
+        '+edns[enable EDNS]' '+noedns[disable EDNS]'
+        '+nsid[request server identifier]'
+        '+idnin[punycode-convert input]' '+noidnin[send raw names]'
+        '+idnout[display Unicode names]' '+noidnout[display A-labels]'
+        '+propagation[check 10 public resolvers]' '+prop[alias for +propagation]'
+        '+bench[benchmark 100 queries]' '+watch[re-query every 2s]'
+        '+doh[DNS-over-HTTPS]'
+        '+timeout=[per-try timeout seconds]:seconds:'
+        '+retry=[UDP retries after timeout]:count:'
+        '+bench=[benchmark query count]:count:'
+        '+watch=[re-query interval seconds]:seconds:'
+        '+doh=[DoH provider or URL]:provider:(cloudflare google quad9 opendns adguard wikimedia)'
+        '+subnet=[EDNS client subnet IP/prefix]:subnet:'
+    )
+    types=(A AAAA NS CNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY)
+    servers=('@1.1.1.1' '@8.8.8.8' '@9.9.9.9')
+
+    _arguments -s \
+        '-x[reverse DNS lookup]:address:' \
+        '-p[server port]:port:' \
+        '-c[query class]:class:(IN CH HS ANY)' \
+        '-f[batch file]:file:_files' \
+        '(-h --help)'{-h,--help}'[show help]' \
+        '(-V --version)'{-V,--version}'[show version]' \
+        "*: :{_describe 'option' plus_flags -- servers || _values 'record type' $types}"
+}
+_digg "$@"

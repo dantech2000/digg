@@ -33,7 +33,8 @@ jobs:
           archive="digg_${version}_${{ matrix.asset_suffix }}.tar.gz"
           mkdir -p stage
           cp target/release/digg docs/digg.1 stage/
-          tar -C stage -czf "dist/$archive" digg digg.1
+          cp -R completions stage/
+          tar -C stage -czf "dist/$archive" digg digg.1 completions
           shasum -a 256 "dist/$archive" > "dist/$archive.sha256"
       - uses: actions/upload-artifact@v7
         with:
