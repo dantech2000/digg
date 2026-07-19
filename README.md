@@ -224,7 +224,7 @@ stdout and per-query failures to stderr, so pipelines see clean data.
 | `+timeout=N`   | Per-try timeout in seconds (default: 5)  |
 | `+retry=N`     | UDP retries after timeout (default: 2)   |
 | `+dot`         | DNS-over-TLS                             |
-| `+doh[=NAME]`  | DNS-over-HTTPS                           |
+| `+doh[=NAME]`  | DNS-over-HTTPS (cloudflare, google, quad9, opendns, adguard, wikimedia, or a URL) |
 | `+dnssec`      | Request DNSSEC records                   |
 | `+subnet=IP[/N]` | EDNS Client Subnet (RFC 7871); `+subnet=0` opts out |
 | `+nsid`        | Request the server identifier (RFC 5001) |

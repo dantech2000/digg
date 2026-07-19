@@ -484,6 +484,7 @@ fn reverse_name(addr: &str) -> Result<String, DnsError> {
 
 pub fn print_usage() {
     let color = crate::output::stdout_color_enabled();
+    let providers = crate::doh::provider_names().join(" ");
 
     let (bold, dim, cyan, green, yellow, reset) = if color {
         (
@@ -540,7 +541,7 @@ pub fn print_usage() {
     {yellow}+dnssec{reset}         Request DNSSEC records (sets DO bit)
     {yellow}+dot{reset}            Use DNS-over-TLS (port 853)
     {yellow}+doh{reset}            Use DNS-over-HTTPS {dim}(Cloudflare){reset}
-    {yellow}+doh=google{reset}     Use DNS-over-HTTPS via Google
+    {yellow}+doh=NAME{reset}       DoH via a known provider: {providers}
     {yellow}+doh=URL{reset}        Use DNS-over-HTTPS via custom URL
 
 {bold}DISPLAY:{reset}
