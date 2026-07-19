@@ -6,6 +6,7 @@ mod compare;
 mod doh;
 mod dot;
 mod error;
+mod idn;
 mod output;
 mod propagation;
 mod protocol;
@@ -38,6 +39,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
     all_args.extend_from_slice(args);
     let opts = cli::parse_args(&all_args)?;
     output::set_color_mode(opts.color);
+    output::set_idn_out(opts.idn_out);
     let timeout = Duration::from_secs(opts.timeout);
 
     // Build EDNS options
@@ -75,7 +77,14 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
 
     // Batch mode
     if let Some(ref file) = opts.batch_file {
-        let queries = batch::read_batch_queries(file)?;
+        let mut queries = batch::read_batch_queries(file)?;
+        if opts.idn_in {
+            for q in &mut queries {
+                if !q.name.is_ascii() {
+                    q.name = idn::to_ascii(&q.name)?;
+                }
+            }
+        }
         let server = resolve_server()?;
         let results = batch::run_batch(
             &queries,
