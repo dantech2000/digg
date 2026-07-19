@@ -50,6 +50,7 @@ pub struct Options {
     pub watch: Option<u64>,
     pub subnet: Option<(std::net::IpAddr, u8)>,
     pub nsid: bool,
+    pub retry: u32,
     pub queries: Vec<(RecordType, String)>,
 }
 
@@ -83,6 +84,7 @@ impl Default for Options {
             watch: None,
             subnet: None,
             nsid: false,
+            retry: 2,
             queries: Vec::new(),
         }
     }
@@ -350,6 +352,12 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         s if s.starts_with("+doh=") => {
             opts.doh = Some(s[5..].to_string());
         }
+        s if s.starts_with("+retry=") => {
+            let retry_str = &s[7..];
+            opts.retry = retry_str
+                .parse::<u32>()
+                .map_err(|_| DnsError::Usage(format!("invalid retry count: {}", retry_str)))?;
+        }
         s if s.starts_with("+subnet=") => {
             opts.subnet = Some(parse_subnet(&s[8..])?);
         }
@@ -484,7 +492,8 @@ pub fn print_usage() {
     {yellow}+notcp{reset}          Force UDP transport
     {yellow}+recurse{reset}        Enable recursion {dim}(default){reset}
     {yellow}+norecurse{reset}      Disable recursion
-    {yellow}+timeout=N{reset}      Query timeout in seconds {dim}(default: 5){reset}
+    {yellow}+timeout=N{reset}      Per-try query timeout in seconds {dim}(default: 5){reset}
+    {yellow}+retry=N{reset}        UDP retries after a timeout {dim}(default: 2, +retry=0 disables){reset}
     {yellow}+edns{reset}           Enable EDNS(0) {dim}(default){reset}
     {yellow}+noedns{reset}         Disable EDNS(0)
     {yellow}+subnet=IP[/N]{reset}  Send EDNS Client Subnet {dim}(RFC 7871; default /24, /56 v6){reset}
@@ -958,5 +967,16 @@ mod tests {
         assert!(!parse(&["e.com"]).nsid);
         assert!(parse_err(&["e.com", "+nsid", "+noedns"]).contains("+nsid requires EDNS"));
         assert!(parse_err(&["e.com", "+noedns", "+nsid"]).contains("+nsid requires EDNS"));
+    }
+
+    // === UDP retries (+retry) ===
+
+    #[test]
+    fn retry_defaults_to_two_and_parses_explicit_values() {
+        assert_eq!(parse(&["e.com"]).retry, 2);
+        assert_eq!(parse(&["e.com", "+retry=0"]).retry, 0);
+        assert_eq!(parse(&["e.com", "+retry=5"]).retry, 5);
+        assert!(parse_err(&["e.com", "+retry=abc"]).contains("invalid retry count"));
+        assert!(parse_err(&["e.com", "+retry="]).contains("invalid retry count"));
     }
 }

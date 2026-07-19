@@ -194,7 +194,9 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             doh::send_doh_query(url, &query, timeout)?
         } else {
             let force_tcp = opts.tcp.unwrap_or(false);
-            transport::send_query(&server, opts.port, &query, force_tcp, timeout)?
+            transport::send_query_with_retries(
+                &server, opts.port, &query, force_tcp, timeout, opts.retry,
+            )?
         };
 
         transport::verify_id(&result.message.header, query_id)?;

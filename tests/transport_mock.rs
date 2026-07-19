@@ -14,6 +14,8 @@ use std::time::Duration;
 enum Behavior {
     /// Well-formed answer with the given IPv4 rdata, one A record per address.
     Answer(&'static [[u8; 4]]),
+    /// Ignore the first `drops` requests, then answer (exercises retries).
+    AnswerAfterDrops(&'static [[u8; 4]], u32),
     /// Empty answer with the TC bit set (tells the client to retry over TCP).
     Truncated,
     /// Answer whose transaction ID does not match the query's.
@@ -43,13 +45,26 @@ impl MockDns {
             let udp_socket = Arc::new(socket);
             let udp_behavior = udp;
             let udp_handle = Arc::clone(&udp_socket);
-            thread::spawn(move || loop {
-                let mut buf = [0u8; 65535];
-                let Ok((len, peer)) = udp_handle.recv_from(&mut buf) else {
-                    return;
-                };
-                if let Some(resp) = build_response(&buf[..len], udp_behavior) {
-                    let _ = udp_handle.send_to(&resp, peer);
+            thread::spawn(move || {
+                let mut seen = 0u32;
+                loop {
+                    let mut buf = [0u8; 65535];
+                    let Ok((len, peer)) = udp_handle.recv_from(&mut buf) else {
+                        return;
+                    };
+                    seen += 1;
+                    let effective = match udp_behavior {
+                        Behavior::AnswerAfterDrops(addrs, drops) => {
+                            if seen <= drops {
+                                continue;
+                            }
+                            Behavior::Answer(addrs)
+                        }
+                        other => other,
+                    };
+                    if let Some(resp) = build_response(&buf[..len], effective) {
+                        let _ = udp_handle.send_to(&resp, peer);
+                    }
                 }
             });
 
@@ -102,7 +117,7 @@ fn build_response(query: &[u8], behavior: Behavior) -> Option<Vec<u8>> {
         Behavior::Answer(addrs) => (0x81, addrs), // qr | rd
         Behavior::WrongId => (0x81, &[[9, 9, 9, 9]]),
         Behavior::Truncated => (0x83, &[]), // qr | tc | rd
-        Behavior::Silent => unreachable!(),
+        Behavior::Silent | Behavior::AnswerAfterDrops(..) => unreachable!(),
     };
 
     let mut resp = Vec::new();
@@ -214,7 +229,7 @@ fn mismatched_transaction_id_is_rejected() {
 #[test]
 fn udp_timeout_is_a_network_error_with_exit_code_9() {
     let server = MockDns::start(Behavior::Silent, Behavior::Silent);
-    let output = run_digg(server.port, &["+timeout=1", "+notcp"]);
+    let output = run_digg(server.port, &["+timeout=1", "+notcp", "+retry=0"]);
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(9), "network errors exit 9");
     assert!(stderr(&output).contains("error"));
@@ -264,7 +279,7 @@ fn tcp_answer_with_many_records_round_trips_framing() {
 fn timeout_flag_bounds_wall_clock() {
     let server = MockDns::start(Behavior::Silent, Behavior::Silent);
     let start = std::time::Instant::now();
-    let output = run_digg(server.port, &["+timeout=1", "+notcp"]);
+    let output = run_digg(server.port, &["+timeout=1", "+notcp", "+retry=0"]);
     let elapsed = start.elapsed();
     assert!(!output.status.success());
     // Generous upper bound: 1s timeout should never take 5s.
@@ -295,4 +310,35 @@ fn chaos_class_query_round_trips_through_transport() {
         .expect("run digg");
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stdout(&output).contains("NOERROR"));
+}
+
+#[test]
+fn udp_retry_recovers_from_a_dropped_datagram() {
+    static ADDRS: [[u8; 4]; 1] = [[4, 3, 2, 1]];
+    // First request dropped; the retry gets the answer.
+    let server = MockDns::start(Behavior::AnswerAfterDrops(&ADDRS, 1), Behavior::Silent);
+    let output = run_digg(server.port, &["+timeout=1", "+retry=2", "+short"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "4.3.2.1\n");
+}
+
+#[test]
+fn retry_zero_fails_on_a_single_dropped_datagram() {
+    static ADDRS: [[u8; 4]; 1] = [[4, 3, 2, 1]];
+    let server = MockDns::start(Behavior::AnswerAfterDrops(&ADDRS, 1), Behavior::Silent);
+    let output = run_digg(server.port, &["+timeout=1", "+retry=0", "+notcp"]);
+    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(9));
+}
+
+#[test]
+fn exhausted_retries_report_attempt_count() {
+    let server = MockDns::start(Behavior::Silent, Behavior::Silent);
+    let output = run_digg(server.port, &["+timeout=1", "+retry=1", "+notcp"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("2 attempts"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
