@@ -49,6 +49,7 @@ pub struct Options {
     pub propagation: bool,
     pub watch: Option<u64>,
     pub subnet: Option<(std::net::IpAddr, u8)>,
+    pub nsid: bool,
     pub queries: Vec<(RecordType, String)>,
 }
 
@@ -81,6 +82,7 @@ impl Default for Options {
             propagation: false,
             watch: None,
             subnet: None,
+            nsid: false,
             queries: Vec::new(),
         }
     }
@@ -210,6 +212,12 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
         ));
     }
 
+    if opts.nsid && !opts.edns {
+        return Err(DnsError::Usage(
+            "+nsid requires EDNS; remove +noedns".into(),
+        ));
+    }
+
     Ok(opts)
 }
 
@@ -307,6 +315,7 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+noedns" => opts.edns = false,
         "+bench" => opts.bench = Some(100),
         "+propagation" | "+prop" => opts.propagation = true,
+        "+nsid" => opts.nsid = true,
         "+watch" => opts.watch = Some(2),
         "+doh" => opts.doh = Some(String::new()),
         s if s.starts_with("+timeout=") => {
@@ -480,6 +489,7 @@ pub fn print_usage() {
     {yellow}+noedns{reset}         Disable EDNS(0)
     {yellow}+subnet=IP[/N]{reset}  Send EDNS Client Subnet {dim}(RFC 7871; default /24, /56 v6){reset}
     {yellow}+subnet=0{reset}       Ask the resolver not to forward any subnet
+    {yellow}+nsid{reset}           Request the server identifier {dim}(RFC 5001){reset}
 
 {bold}SECURITY:{reset}
     {yellow}+dnssec{reset}         Request DNSSEC records (sets DO bit)
@@ -938,5 +948,15 @@ mod tests {
         assert!(
             parse_err(&["e.com", "+noedns", "+subnet=1.2.3.4"]).contains("+subnet requires EDNS")
         );
+    }
+
+    // === NSID (+nsid) ===
+
+    #[test]
+    fn nsid_flag_parses_and_conflicts_with_noedns() {
+        assert!(parse(&["e.com", "+nsid"]).nsid);
+        assert!(!parse(&["e.com"]).nsid);
+        assert!(parse_err(&["e.com", "+nsid", "+noedns"]).contains("+nsid requires EDNS"));
+        assert!(parse_err(&["e.com", "+noedns", "+nsid"]).contains("+nsid requires EDNS"));
     }
 }
