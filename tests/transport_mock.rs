@@ -342,3 +342,27 @@ fn exhausted_retries_report_attempt_count() {
         stderr(&output)
     );
 }
+
+#[test]
+fn qr_prints_the_outgoing_query_before_the_answer() {
+    static ADDRS: [[u8; 4]; 1] = [[1, 2, 3, 4]];
+    let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+    let output = run_digg(server.port, &["+qr"]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let query_pos = text.find("QUERY").expect("query section present");
+    let answer_pos = text.find("ANSWER").expect("answer section present");
+    assert!(query_pos < answer_pos);
+    assert!(text.contains("example.com.  IN  A"));
+}
+
+#[test]
+fn nostats_hides_the_status_footer() {
+    static ADDRS: [[u8; 4]; 1] = [[1, 2, 3, 4]];
+    let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+    let output = run_digg(server.port, &["+nostats", "+noauthority", "+noadditional"]);
+    let text = stdout(&output);
+    assert!(output.status.success());
+    assert!(text.contains("1.2.3.4"));
+    assert!(!text.contains("NOERROR"));
+}

@@ -188,6 +188,12 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             edns.as_ref(),
         )?;
 
+        if opts.qr && !opts.json && !opts.yaml {
+            // Parse the exact bytes going on the wire so +qr cannot lie.
+            let parsed = DnsMessage::parse(&query)?;
+            output::print_query(&parsed, &server, opts.port);
+        }
+
         let result = if opts.dot {
             dot::send_dot_query(&server, &query, timeout)?
         } else if let Some(ref url) = doh_url {
@@ -214,6 +220,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
                 opts.port,
                 opts.show_authority,
                 opts.show_additional,
+                opts.stats,
             );
         }
 

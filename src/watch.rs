@@ -77,7 +77,7 @@ pub fn run_watch(
                 if short {
                     output::print_short(&r);
                 } else {
-                    output::print_full(&r, server, port, false, false);
+                    output::print_full(&r, server, port, false, false, true);
                 }
             }
             Err(e) => {
