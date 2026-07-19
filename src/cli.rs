@@ -206,6 +206,13 @@ fn resolve_queries_from_positionals(
                 types_found.push(pending_type);
             }
             pending_type = Some(rtype);
+        } else if is_numeric_type_syntax(pos) {
+            // Looks like RFC 3597 TYPE<N> but didn't parse: the number is out
+            // of range. Erroring beats silently querying it as a hostname.
+            return Err(DnsError::Usage(format!(
+                "invalid record type: {} (TYPE value must be 0-65535)",
+                pos
+            )));
         } else if let Some(pending_type) = pending_type.take() {
             // Type followed by name -> pair them
             queries.push((pending_type, pos.clone()));
@@ -316,6 +323,16 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
     Ok(())
 }
 
+/// True when a token is shaped like RFC 3597 `TYPE<N>` syntax (used to
+/// distinguish an out-of-range type number from an ordinary hostname).
+fn is_numeric_type_syntax(token: &str) -> bool {
+    let upper = token.to_uppercase();
+    match upper.strip_prefix("TYPE") {
+        Some(num) => !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
 fn reverse_name(addr: &str) -> Result<String, DnsError> {
     if let Ok(v4) = addr.parse::<std::net::Ipv4Addr>() {
         let octets = v4.octets();
@@ -370,6 +387,7 @@ pub fn print_usage() {
                     IP addresses auto-detect as reverse PTR lookups
     {cyan}type{reset}            Record type: A AAAA NS MX CNAME TXT SOA PTR SRV CAA
                     HTTPS SVCB DS RRSIG DNSKEY NSEC NSEC3 AXFR ANY
+                    TYPE{dim}N{reset} queries an arbitrary numeric type (RFC 3597)
                     {dim}(default: A, case-insensitive){reset}
 
 {bold}OPTIONS:{reset}
@@ -729,5 +747,46 @@ mod tests {
         assert!(reverse_name("example.com").is_err());
         assert!(reverse_name("").is_err());
         assert!(reverse_name("256.1.1.1").is_err());
+    }
+
+    // === RFC 3597 TYPE<N> syntax ===
+
+    #[test]
+    fn type_n_positional_queries_arbitrary_type() {
+        let opts = parse(&["example.com", "TYPE64512"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::Unknown(64512), "example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn type_n_works_in_multi_query_mode() {
+        let opts = parse(&["TYPE64512", "example.com", "A", "example.org"]);
+        assert_eq!(
+            opts.queries,
+            vec![
+                (RecordType::Unknown(64512), "example.com".to_string()),
+                (RecordType::A, "example.org".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn type_n_out_of_range_is_a_usage_error_not_a_hostname() {
+        assert!(parse_err(&["example.com", "TYPE70000"]).contains("invalid record type"));
+        assert!(parse_err(&["TYPE65536"]).contains("invalid record type"));
+    }
+
+    #[test]
+    fn hostnames_starting_with_type_are_still_names() {
+        let opts = parse(&["typefoo.example.com"]);
+        assert_eq!(
+            opts.queries,
+            vec![(RecordType::A, "typefoo.example.com".to_string())]
+        );
+        // Bare "TYPE" with no digits is a hostname, not type syntax.
+        let opts = parse(&["type"]);
+        assert_eq!(opts.queries, vec![(RecordType::A, "type".to_string())]);
     }
 }
