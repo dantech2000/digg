@@ -60,6 +60,7 @@ digg -x 2001:4860:4860::8888           # Explicit reverse
 digg example.com +short                 # Terse output
 digg example.com +json                  # JSON output
 digg example.com +yaml                  # YAML output
+digg example.com +tsv                   # Tab-separated, parse-stable output
 
 # Color control
 NO_COLOR=1 digg example.com              # Disable color using the standard convention
@@ -184,6 +185,29 @@ Put default options in `~/.diggrc`, one per line, applied before CLI args. Lines
 +timeout=3
 ```
 
+## Machine-readable output (`+tsv`)
+
+`+tsv` emits one answer record per line with tab-separated fields:
+
+```
+name<TAB>ttl<TAB>class<TAB>type<TAB>rdata
+```
+
+```sh
+$ digg example.com MX +tsv
+example.com.	3600	IN	MX	10 mail.example.com.
+
+$ digg example.com +tsv | awk -F'\t' '{print $5}'
+93.184.216.34
+```
+
+**Stability contract:** the field order, tab separator, and raw-seconds TTL
+will not change within a major version. TTLs are numeric (not humanized),
+output contains no headers, colors, or footer regardless of terminal, and
+tabs/newlines/backslashes inside rdata are escaped as `\t`, `\n`, `\\` so a
+line always has exactly five fields. In batch mode (`-f`), answers go to
+stdout and per-query failures to stderr, so pipelines see clean data.
+
 ## Options Reference
 
 | Option         | Description                              |
@@ -191,13 +215,19 @@ Put default options in `~/.diggrc`, one per line, applied before CLI args. Lines
 | `+short`       | Terse output (one value per line)        |
 | `+json`        | JSON output                              |
 | `+yaml`        | YAML output                              |
+| `+tsv`         | Tab-separated output (parse-stable; see above) |
+| `+qr`          | Print the outgoing query before sending  |
+| `+nostats`     | Hide the server/rcode/time/size footer   |
 | `+color`       | Force color output                       |
 | `+nocolor`     | Disable color output                     |
 | `+tcp`         | Force TCP                                |
-| `+timeout=N`   | Timeout in seconds (default: 5)          |
+| `+timeout=N`   | Per-try timeout in seconds (default: 5)  |
+| `+retry=N`     | UDP retries after timeout (default: 2)   |
 | `+dot`         | DNS-over-TLS                             |
 | `+doh[=NAME]`  | DNS-over-HTTPS                           |
 | `+dnssec`      | Request DNSSEC records                   |
+| `+subnet=IP[/N]` | EDNS Client Subnet (RFC 7871); `+subnet=0` opts out |
+| `+nsid`        | Request the server identifier (RFC 5001) |
 | `+trace`       | Trace delegation from root               |
 | `+bench[=N]`   | Benchmark with N queries (default: 100)  |
 | `+noedns`      | Disable EDNS(0)                          |
@@ -208,11 +238,12 @@ Put default options in `~/.diggrc`, one per line, applied before CLI args. Lines
 | `+watch[=N]`   | Re-query every N seconds (default: 2)    |
 | `-x addr`      | Explicit reverse lookup                  |
 | `-p port`      | Server port (default: 53)                |
+| `-c class`     | Query class: IN, CH, HS, ANY (default: IN) |
 | `-f file`      | Batch mode (use `-` for stdin)           |
 
 ## Supported Record Types
 
-A, AAAA, NS, MX, CNAME, TXT, SOA, PTR, SRV, CAA, HTTPS, SVCB, DS, RRSIG, DNSKEY, NSEC, NSEC3, NSEC3PARAM, OPT, AXFR, ANY
+A, AAAA, NS, MX, CNAME, TXT, SOA, PTR, SRV, CAA, HTTPS, SVCB, DS, RRSIG, DNSKEY, NSEC, NSEC3, NSEC3PARAM, OPT, AXFR, ANY — plus any numeric type via RFC 3597 `TYPE<N>` syntax (e.g. `digg example.com TYPE64512`)
 
 ## License
 

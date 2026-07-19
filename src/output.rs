@@ -375,6 +375,54 @@ mod tests {
         assert!(text.contains("EDNS version 0; flags: do; udp: 4096"));
     }
 
+    // === TSV golden tests ===
+
+    #[test]
+    fn write_tsv_golden_one_record_per_line() {
+        let result = fixture_result(vec![
+            a_record("example.com.", 3600, [93, 184, 216, 34]),
+            a_record("example.com.", 3600, [93, 184, 216, 35]),
+        ]);
+        let text = render(|out| write_tsv(out, &result));
+        assert_eq!(
+            text,
+            "example.com.\t3600\tIN\tA\t93.184.216.34\n\
+             example.com.\t3600\tIN\tA\t93.184.216.35\n"
+        );
+    }
+
+    #[test]
+    fn write_tsv_contains_no_ansi_and_no_headers() {
+        let result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        let text = render(|out| write_tsv(out, &result));
+        assert!(!text.contains('\x1b'));
+        assert!(!text.contains("TYPE"));
+        assert!(!text.contains("NOERROR"));
+    }
+
+    #[test]
+    fn write_tsv_escapes_tabs_newlines_and_backslashes_in_rdata() {
+        let mut result = fixture_result(vec![]);
+        result.message.answers.push(ResourceRecord {
+            name: "example.com.".to_string(),
+            rtype: RecordType::TXT,
+            rclass: RecordClass::IN,
+            ttl: 60,
+            rdata: RData::TXT(vec!["a\tb\nc\\d".to_string()]),
+        });
+        let text = render(|out| write_tsv(out, &result));
+        let rdata_field = text.trim_end().split('\t').nth(4).unwrap().to_string();
+        assert_eq!(rdata_field, "\"a\\tb\\nc\\\\d\"");
+        // Exactly 5 fields — embedded separators never add columns.
+        assert_eq!(text.trim_end().split('\t').count(), 5);
+    }
+
+    #[test]
+    fn write_tsv_of_empty_answer_set_is_empty() {
+        let result = fixture_result(vec![]);
+        assert_eq!(render(|out| write_tsv(out, &result)), "");
+    }
+
     // === format_ttl ===
 
     #[test]
@@ -582,6 +630,50 @@ pub fn write_full<W: Write>(
         " {} {} {} {} {} {} {} {} {}",
         sep, server_info, sep, rcode_str, sep, timing, sep, size, sep
     );
+}
+
+// === TSV output ===
+
+pub fn print_tsv(result: &QueryResult) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write_tsv(&mut out, result);
+}
+
+/// Stable machine-readable format: one answer record per line,
+/// `name<TAB>ttl<TAB>class<TAB>type<TAB>rdata`. TTL is raw seconds. Field
+/// order and separator are a documented compatibility contract (README);
+/// do not change them within a major version. rdata embedded tabs,
+/// newlines, and backslashes are escaped as \t, \n, \\.
+pub fn write_tsv<W: Write>(out: &mut W, result: &QueryResult) {
+    for rr in &result.message.answers {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}",
+            rr.name,
+            rr.ttl,
+            rr.rclass,
+            rr.rtype,
+            escape_tsv_field(&rr.rdata.to_string())
+        );
+    }
+}
+
+fn escape_tsv_field(value: &str) -> String {
+    if !value.contains(['\t', '\n', '\r', '\\']) {
+        return value.to_string();
+    }
+    let mut escaped = String::with_capacity(value.len() + 4);
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 // === JSON output ===

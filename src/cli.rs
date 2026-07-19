@@ -39,6 +39,7 @@ pub struct Options {
     pub trace: bool,
     pub json: bool,
     pub yaml: bool,
+    pub tsv: bool,
     pub bench: Option<usize>,
     pub batch_file: Option<String>,
     pub dnssec: bool,
@@ -75,6 +76,7 @@ impl Default for Options {
             trace: false,
             json: false,
             yaml: false,
+            tsv: false,
             bench: None,
             batch_file: None,
             dnssec: false,
@@ -316,6 +318,7 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+dnssec" => opts.dnssec = true,
         "+json" => opts.json = true,
         "+yaml" => opts.yaml = true,
+        "+tsv" => opts.tsv = true,
         "+dot" => opts.dot = true,
         "+edns" => opts.edns = true,
         "+noedns" => opts.edns = false,
@@ -496,6 +499,7 @@ pub fn print_usage() {
     {yellow}+short{reset}          Terse output (one value per line)
     {yellow}+json{reset}           JSON output
     {yellow}+yaml{reset}           YAML output
+    {yellow}+tsv{reset}            Tab-separated output: name ttl class type rdata
     {yellow}+tcp{reset}            Force TCP transport
     {yellow}+notcp{reset}          Force UDP transport
     {yellow}+recurse{reset}        Enable recursion {dim}(default){reset}
@@ -1000,5 +1004,13 @@ mod tests {
         assert!(parse(&["e.com"]).stats);
         assert!(!parse(&["e.com", "+nostats"]).stats);
         assert!(parse(&["e.com", "+nostats", "+stats"]).stats);
+    }
+
+    // === +tsv ===
+
+    #[test]
+    fn tsv_flag_parses() {
+        assert!(parse(&["e.com", "+tsv"]).tsv);
+        assert!(!parse(&["e.com"]).tsv);
     }
 }
