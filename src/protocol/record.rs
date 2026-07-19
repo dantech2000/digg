@@ -846,3 +846,416 @@ fn parse_type_bitmaps(buf: &[u8], offset: usize, length: usize) -> Vec<RecordTyp
     }
     types
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === Simple address / name variants ===
+
+    #[test]
+    fn address_and_name_rdata_render_plainly() {
+        assert_eq!(
+            RData::A(Ipv4Addr::new(93, 184, 216, 34)).to_string(),
+            "93.184.216.34"
+        );
+        assert_eq!(
+            RData::AAAA("2606:2800:220:1::1946".parse().unwrap()).to_string(),
+            "2606:2800:220:1::1946"
+        );
+        assert_eq!(
+            RData::NS("ns1.example.com.".into()).to_string(),
+            "ns1.example.com."
+        );
+        assert_eq!(
+            RData::CNAME("www.example.com.".into()).to_string(),
+            "www.example.com."
+        );
+        assert_eq!(
+            RData::PTR("host.example.com.".into()).to_string(),
+            "host.example.com."
+        );
+        assert_eq!(
+            RData::MX {
+                preference: 10,
+                exchange: "mail.example.com.".into()
+            }
+            .to_string(),
+            "10 mail.example.com."
+        );
+    }
+
+    // === TXT quoting ===
+
+    #[test]
+    fn txt_strings_are_quoted_and_space_joined() {
+        assert_eq!(
+            RData::TXT(vec!["v=spf1 -all".into()]).to_string(),
+            "\"v=spf1 -all\""
+        );
+        assert_eq!(
+            RData::TXT(vec!["a".into(), "b".into()]).to_string(),
+            "\"a\" \"b\""
+        );
+        assert_eq!(RData::TXT(vec!["".into()]).to_string(), "\"\"");
+    }
+
+    #[test]
+    fn txt_embedded_quotes_are_not_escaped_yet() {
+        // Pins current behavior: inner quotes pass through unescaped. If this
+        // is ever changed to RFC 1035 \" escaping, update this test deliberately.
+        assert_eq!(
+            RData::TXT(vec!["say \"hi\"".into()]).to_string(),
+            "\"say \"hi\"\""
+        );
+    }
+
+    // === Structured variants ===
+
+    #[test]
+    fn soa_renders_all_seven_fields_in_order() {
+        let soa = RData::SOA {
+            mname: "ns1.example.com.".into(),
+            rname: "hostmaster.example.com.".into(),
+            serial: 2024010101,
+            refresh: 7200,
+            retry: 3600,
+            expire: 1209600,
+            minimum: 300,
+        };
+        assert_eq!(
+            soa.to_string(),
+            "ns1.example.com. hostmaster.example.com. 2024010101 7200 3600 1209600 300"
+        );
+    }
+
+    #[test]
+    fn srv_renders_priority_weight_port_target() {
+        let srv = RData::SRV {
+            priority: 10,
+            weight: 60,
+            port: 5060,
+            target: "sip.example.com.".into(),
+        };
+        assert_eq!(srv.to_string(), "10 60 5060 sip.example.com.");
+    }
+
+    #[test]
+    fn caa_renders_with_quoted_value() {
+        let caa = RData::CAA {
+            flags: 0,
+            tag: "issue".into(),
+            value: "letsencrypt.org".into(),
+        };
+        assert_eq!(caa.to_string(), "0 issue \"letsencrypt.org\"");
+    }
+
+    // === DNSSEC variants ===
+
+    #[test]
+    fn ds_digest_renders_uppercase_hex() {
+        let ds = RData::DS {
+            key_tag: 20326,
+            algorithm: 8,
+            digest_type: 2,
+            digest: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        assert_eq!(ds.to_string(), "20326 8 2 DEADBEEF");
+    }
+
+    #[test]
+    fn rrsig_renders_signature_as_base64() {
+        let rrsig = RData::RRSIG {
+            type_covered: RecordType::A,
+            algorithm: 13,
+            labels: 2,
+            original_ttl: 3600,
+            expiration: 1700000000,
+            inception: 1690000000,
+            key_tag: 12345,
+            signer: "example.com.".into(),
+            signature: vec![1, 2, 3, 4],
+        };
+        assert_eq!(
+            rrsig.to_string(),
+            "A 13 2 3600 1700000000 1690000000 12345 example.com. AQIDBA=="
+        );
+    }
+
+    #[test]
+    fn dnskey_renders_key_as_base64() {
+        let key = RData::DNSKEY {
+            flags: 257,
+            protocol: 3,
+            algorithm: 13,
+            public_key: vec![0xFF, 0x00],
+        };
+        assert_eq!(key.to_string(), "257 3 13 /wA=");
+    }
+
+    #[test]
+    fn nsec_renders_next_domain_and_type_list() {
+        let nsec = RData::NSEC {
+            next_domain: "next.example.com.".into(),
+            type_bitmaps: vec![RecordType::A, RecordType::AAAA, RecordType::RRSIG],
+        };
+        assert_eq!(nsec.to_string(), "next.example.com. A AAAA RRSIG");
+    }
+
+    #[test]
+    fn nsec3_empty_salt_renders_as_dash() {
+        let nsec3 = RData::NSEC3 {
+            algorithm: 1,
+            flags: 0,
+            iterations: 10,
+            salt: vec![],
+            next_hashed: vec![0x66],
+            type_bitmaps: vec![RecordType::A],
+        };
+        assert_eq!(nsec3.to_string(), "1 0 10 - CO A");
+    }
+
+    #[test]
+    fn nsec3_salt_renders_as_hex() {
+        let nsec3 = RData::NSEC3 {
+            algorithm: 1,
+            flags: 1,
+            iterations: 5,
+            salt: vec![0xAB, 0xCD],
+            next_hashed: vec![0x66, 0x6F],
+            type_bitmaps: vec![],
+        };
+        assert_eq!(nsec3.to_string(), "1 1 5 ABCD CPNG ");
+    }
+
+    #[test]
+    fn nsec3param_renders_salt_or_dash() {
+        let with_salt = RData::NSEC3PARAM {
+            algorithm: 1,
+            flags: 0,
+            iterations: 12,
+            salt: vec![0x01, 0x02],
+        };
+        assert_eq!(with_salt.to_string(), "1 0 12 0102");
+        let no_salt = RData::NSEC3PARAM {
+            algorithm: 1,
+            flags: 0,
+            iterations: 0,
+            salt: vec![],
+        };
+        assert_eq!(no_salt.to_string(), "1 0 0 -");
+    }
+
+    #[test]
+    fn base32hex_matches_rfc4648_test_vectors() {
+        // RFC 4648 §10, padding stripped.
+        assert_eq!(base32_encode_hex(b""), "");
+        assert_eq!(base32_encode_hex(b"f"), "CO");
+        assert_eq!(base32_encode_hex(b"fo"), "CPNG");
+        assert_eq!(base32_encode_hex(b"foo"), "CPNMU");
+        assert_eq!(base32_encode_hex(b"foob"), "CPNMUOG");
+        assert_eq!(base32_encode_hex(b"fooba"), "CPNMUOJ1");
+        assert_eq!(base32_encode_hex(b"foobar"), "CPNMUOJ1E8");
+    }
+
+    // === SVCB / HTTPS (RFC 9460) ===
+
+    fn param(key: u16, value: &[u8]) -> SvcParam {
+        SvcParam {
+            key,
+            value: value.to_vec(),
+        }
+    }
+
+    #[test]
+    fn svcb_alias_mode_renders_priority_and_target_only() {
+        let alias = RData::SVCB {
+            priority: 0,
+            target: "svc.example.com.".into(),
+            params: vec![],
+        };
+        assert_eq!(alias.to_string(), "0 svc.example.com.");
+    }
+
+    #[test]
+    fn https_params_render_each_known_key() {
+        let https = RData::HTTPS {
+            priority: 1,
+            target: ".".into(),
+            params: vec![
+                param(0, &[0x00, 0x01, 0x00, 0x04]), // mandatory=alpn,ipv4hint
+                param(1, &[2, b'h', b'3', 2, b'h', b'2']), // alpn="h3,h2"
+                param(2, &[]),                       // no-default-alpn
+                param(3, &[0x01, 0xBB]),             // port=443
+                param(4, &[1, 2, 3, 4, 5, 6, 7, 8]), // two ipv4 hints
+                param(5, &[0xAB, 0xCD]),             // ech base64
+                param(6, &{
+                    let mut v = vec![0u8; 16];
+                    v[0] = 0x20;
+                    v[1] = 0x01;
+                    v[2] = 0x0d;
+                    v[3] = 0xb8;
+                    v[15] = 1;
+                    v
+                }), // ipv6hint
+                param(667, &[0xFF]),                 // unknown key
+            ],
+        };
+        assert_eq!(
+            https.to_string(),
+            "1 . mandatory=alpn,ipv4hint alpn=\"h3,h2\" no-default-alpn port=443 \
+             ipv4hint=1.2.3.4,5.6.7.8 ech=\"q80=\" ipv6hint=2001:db8::1 key667=\"FF\""
+        );
+    }
+
+    #[test]
+    fn svc_param_port_too_short_renders_invalid_marker() {
+        assert_eq!(format_svc_param(&param(3, &[0x01])), "port=<invalid>");
+    }
+
+    #[test]
+    fn svc_param_truncated_lists_drop_partial_entries() {
+        // 5 bytes is one full IPv4 hint plus a dangling byte — dangling ignored.
+        assert_eq!(
+            format_svc_param(&param(4, &[1, 2, 3, 4, 9])),
+            "ipv4hint=1.2.3.4"
+        );
+        // Truncated alpn length prefix: entry dropped, no panic.
+        assert_eq!(format_svc_param(&param(1, &[5, b'h'])), "alpn=\"\"");
+        // Odd-length mandatory list: dangling byte ignored.
+        assert_eq!(
+            format_svc_param(&param(0, &[0x00, 0x03, 0xFF])),
+            "mandatory=port"
+        );
+    }
+
+    // === OPT / unknown ===
+
+    #[test]
+    fn opt_renders_placeholder() {
+        assert_eq!(RData::OPT(vec![1, 2, 3]).to_string(), "<OPT>");
+    }
+
+    #[test]
+    fn unknown_rdata_renders_rfc3597_generic_format() {
+        assert_eq!(
+            RData::Unknown(vec![0xDE, 0xAD, 0xBE, 0xEF]).to_string(),
+            "\\# 4 DEADBEEF"
+        );
+    }
+
+    #[test]
+    fn unknown_rdata_empty_pins_current_trailing_space() {
+        // RFC 3597 presentation for empty RDATA is "\# 0" with no trailing
+        // space; current output has one. Pinned deliberately — fix tracked
+        // with the TYPE<N> query work (issue #37).
+        assert_eq!(RData::Unknown(vec![]).to_string(), "\\# 0 ");
+    }
+
+    // === Category predicates ===
+
+    #[test]
+    fn rdata_category_predicates_partition_variants() {
+        assert!(RData::NS("a.".into()).is_name());
+        assert!(RData::HTTPS {
+            priority: 1,
+            target: ".".into(),
+            params: vec![]
+        }
+        .is_name());
+        assert!(RData::TXT(vec![]).is_text());
+        assert!(RData::Unknown(vec![]).is_text());
+        assert!(RData::DS {
+            key_tag: 0,
+            algorithm: 0,
+            digest_type: 0,
+            digest: vec![]
+        }
+        .is_dnssec());
+        assert!(RData::NSEC3PARAM {
+            algorithm: 0,
+            flags: 0,
+            iterations: 0,
+            salt: vec![]
+        }
+        .is_dnssec());
+        assert!(!RData::A(Ipv4Addr::LOCALHOST).is_name());
+        assert!(!RData::A(Ipv4Addr::LOCALHOST).is_text());
+        assert!(!RData::A(Ipv4Addr::LOCALHOST).is_dnssec());
+    }
+
+    // === Wire-format fixture: decode + render round trip ===
+
+    /// HTTPS record captured shape: root name, priority 1, target ".",
+    /// alpn="h3,h2" port=443 ipv4hint=1.2.3.4
+    #[test]
+    fn https_record_decodes_from_wire_and_renders_like_dig() {
+        #[rustfmt::skip]
+        let wire: Vec<u8> = vec![
+            0x00,                   // owner: root
+            0x00, 0x41,             // TYPE 65 (HTTPS)
+            0x00, 0x01,             // CLASS IN
+            0x00, 0x00, 0x0E, 0x10, // TTL 3600
+            0x00, 0x1B,             // RDLENGTH 27
+            0x00, 0x01,             // priority 1
+            0x00,                   // target: root
+            0x00, 0x01, 0x00, 0x06, 0x02, b'h', b'3', 0x02, b'h', b'2', // alpn
+            0x00, 0x03, 0x00, 0x02, 0x01, 0xBB,                         // port 443
+            0x00, 0x04, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,             // ipv4hint
+        ];
+        let (rr, consumed) = ResourceRecord::decode(&wire, 0).unwrap();
+        assert_eq!(consumed, wire.len());
+        assert_eq!(rr.rtype, RecordType::HTTPS);
+        assert_eq!(rr.ttl, 3600);
+        assert_eq!(
+            rr.rdata.to_string(),
+            "1 . alpn=\"h3,h2\" port=443 ipv4hint=1.2.3.4"
+        );
+    }
+
+    #[test]
+    fn svcb_param_value_beyond_rdata_is_an_error() {
+        #[rustfmt::skip]
+        let wire: Vec<u8> = vec![
+            0x00,
+            0x00, 0x40,             // TYPE 64 (SVCB)
+            0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x07,             // RDLENGTH 7
+            0x00, 0x01,             // priority
+            0x00,                   // target root
+            0x00, 0x03, 0x00, 0x63, // port param claims 99-byte value
+        ];
+        assert!(ResourceRecord::decode(&wire, 0).is_err());
+    }
+
+    #[test]
+    fn fixed_length_rdata_rejects_short_buffers() {
+        // A record with rdlength 3.
+        let bad_a: Vec<u8> = vec![
+            0x00, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0x00, 0x03, 1, 2, 3,
+        ];
+        assert!(ResourceRecord::decode(&bad_a, 0).is_err());
+        // AAAA record with rdlength 4.
+        let bad_aaaa: Vec<u8> = vec![
+            0x00, 0x00, 0x1C, 0x00, 0x01, 0, 0, 0, 0, 0x00, 0x04, 1, 2, 3, 4,
+        ];
+        assert!(ResourceRecord::decode(&bad_aaaa, 0).is_err());
+    }
+
+    #[test]
+    fn type_bitmap_window_beyond_window_zero_decodes_high_types() {
+        // Window 1 covers types 256-511; bit 1 of first byte = type 257 (CAA).
+        let buf = vec![0x01, 0x01, 0x40];
+        let types = parse_type_bitmaps(&buf, 0, 3);
+        assert_eq!(types, vec![RecordType::CAA]);
+    }
+
+    #[test]
+    fn type_bitmap_truncated_window_is_ignored_without_panic() {
+        // Claims 4 bitmap bytes but only 1 present.
+        let buf = vec![0x00, 0x04, 0x40];
+        let types = parse_type_bitmaps(&buf, 0, 3);
+        assert!(types.is_empty());
+    }
+}
