@@ -275,30 +275,6 @@ impl fmt::Display for Rcode {
             Rcode::Unknown(n) => write!(f, "RCODE{}", n),
         }
     }
-
-    #[test]
-    fn record_class_mnemonics_and_class_n_parse() {
-        use super::RecordClass;
-        assert_eq!(RecordClass::parse_name("in"), Some(RecordClass::IN));
-        assert_eq!(RecordClass::parse_name("CH"), Some(RecordClass::CH));
-        assert_eq!(RecordClass::parse_name("chaos"), Some(RecordClass::CH));
-        assert_eq!(RecordClass::parse_name("HS"), Some(RecordClass::HS));
-        assert_eq!(RecordClass::parse_name("ANY"), Some(RecordClass::ANY));
-        assert_eq!(RecordClass::parse_name("CLASS3"), Some(RecordClass::CH));
-        assert_eq!(RecordClass::parse_name("CLASS42"), Some(RecordClass::Unknown(42)));
-        assert_eq!(RecordClass::parse_name("CLASS70000"), None);
-        assert_eq!(RecordClass::parse_name("XX"), None);
-    }
-
-    #[test]
-    fn record_class_round_trips_wire_values() {
-        use super::RecordClass;
-        for val in [1u16, 3, 4, 255, 42] {
-            assert_eq!(RecordClass::from_u16(val).to_u16(), val);
-        }
-        assert_eq!(RecordClass::CH.to_string(), "CH");
-        assert_eq!(RecordClass::Unknown(42).to_string(), "CLASS42");
-    }
 }
 
 #[cfg(test)]
@@ -344,5 +320,32 @@ mod tests {
     #[test]
     fn unknown_types_display_as_type_n() {
         assert_eq!(RecordType::Unknown(64512).to_string(), "TYPE64512");
+    }
+
+    #[test]
+    fn record_class_mnemonics_and_class_n_parse() {
+        use super::RecordClass;
+        assert_eq!(RecordClass::parse_name("in"), Some(RecordClass::IN));
+        assert_eq!(RecordClass::parse_name("CH"), Some(RecordClass::CH));
+        assert_eq!(RecordClass::parse_name("chaos"), Some(RecordClass::CH));
+        assert_eq!(RecordClass::parse_name("HS"), Some(RecordClass::HS));
+        assert_eq!(RecordClass::parse_name("ANY"), Some(RecordClass::ANY));
+        assert_eq!(RecordClass::parse_name("CLASS3"), Some(RecordClass::CH));
+        assert_eq!(
+            RecordClass::parse_name("CLASS42"),
+            Some(RecordClass::Unknown(42))
+        );
+        assert_eq!(RecordClass::parse_name("CLASS70000"), None);
+        assert_eq!(RecordClass::parse_name("XX"), None);
+    }
+
+    #[test]
+    fn record_class_round_trips_wire_values() {
+        use super::RecordClass;
+        for val in [1u16, 3, 4, 255, 42] {
+            assert_eq!(RecordClass::from_u16(val).to_u16(), val);
+        }
+        assert_eq!(RecordClass::CH.to_string(), "CH");
+        assert_eq!(RecordClass::Unknown(42).to_string(), "CLASS42");
     }
 }
