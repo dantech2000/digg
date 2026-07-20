@@ -572,6 +572,159 @@ mod tests {
 
     // === format_ttl ===
 
+    // === Renderer golden/structural tests ===
+
+    fn hop(server: &str, answers: Vec<ResourceRecord>) -> crate::trace::TraceHop {
+        crate::trace::TraceHop {
+            server: server.to_string(),
+            result: fixture_result(answers),
+        }
+    }
+
+    #[test]
+    fn write_trace_labels_hops_and_shows_sections() {
+        let mut h1 = hop("a.root-servers.net", vec![]);
+        h1.result
+            .message
+            .authority
+            .push(a_record("com.", 172800, [192, 5, 6, 30]));
+        let h2 = hop(
+            "ns1.example.com",
+            vec![a_record("example.com.", 3600, [93, 184, 216, 34])],
+        );
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_trace(out, &painter, &[h1, h2]));
+        assert!(text.contains("HOP 1"));
+        assert!(text.contains("HOP 2"));
+        assert!(text.contains("a.root-servers.net"));
+        assert!(text.contains("AUTHORITY"));
+        assert!(text.contains("93.184.216.34"));
+        assert!(!text.contains('\x1b'));
+    }
+
+    fn cmp(
+        server: &str,
+        result: Result<QueryResult, crate::error::DnsError>,
+    ) -> crate::compare::ComparisonResult {
+        crate::compare::ComparisonResult {
+            server: server.to_string(),
+            result,
+        }
+    }
+
+    #[test]
+    fn write_comparison_flags_identical_answers() {
+        let results = vec![
+            cmp(
+                "8.8.8.8",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            cmp(
+                "1.1.1.1",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_comparison(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("COMPARING"));
+        assert!(text.contains("@8.8.8.8") && text.contains("@1.1.1.1"));
+        assert!(text.contains("identical"));
+        assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn write_comparison_flags_differing_answers_and_error_arm() {
+        let results = vec![
+            cmp(
+                "8.8.8.8",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            cmp(
+                "1.1.1.1",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [5, 6, 7, 8])])),
+            ),
+            cmp(
+                "9.9.9.9",
+                Err(crate::error::DnsError::Network("timed out".into())),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_comparison(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("differ"));
+        assert!(text.contains("error: timed out"));
+    }
+
+    fn prop(
+        name: &'static str,
+        ip: &'static str,
+        result: Result<QueryResult, crate::error::DnsError>,
+    ) -> crate::propagation::PropagationResult {
+        crate::propagation::PropagationResult {
+            resolver_name: name,
+            resolver_ip: ip,
+            result,
+        }
+    }
+
+    #[test]
+    fn write_propagation_reports_full_agreement() {
+        let results = vec![
+            prop(
+                "Google",
+                "8.8.8.8",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            prop(
+                "Cloudflare",
+                "1.1.1.1",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_propagation(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("PROPAGATION CHECK"));
+        assert!(text.contains("2/2 resolvers agree"));
+        assert!(text.contains("propagation complete"));
+    }
+
+    #[test]
+    fn write_propagation_reports_disagreement_and_unreachable() {
+        let results = vec![
+            prop(
+                "Google",
+                "8.8.8.8",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            prop(
+                "Cloudflare",
+                "1.1.1.1",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [9, 9, 9, 9])])),
+            ),
+            prop(
+                "Quad9",
+                "9.9.9.9",
+                Err(crate::error::DnsError::Network("unreachable".into())),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_propagation(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("propagation incomplete"));
+        assert!(text.contains("unreachable"));
+    }
+
+    #[test]
+    fn write_axfr_dumps_records_with_count() {
+        let records = vec![
+            a_record("example.com.", 3600, [93, 184, 216, 34]),
+            a_record("www.example.com.", 3600, [93, 184, 216, 35]),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_axfr(out, &painter, &records));
+        assert!(text.contains("ZONE TRANSFER (2 records)"));
+        assert!(text.contains("93.184.216.34") && text.contains("93.184.216.35"));
+        assert!(!text.contains('\x1b'));
+    }
+
     #[test]
     fn format_ttl_humanizes_and_keeps_two_largest_units() {
         assert_eq!(format_ttl(0), "0s");
