@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0](https://github.com/dantech2000/digg/compare/v0.4.0...v0.5.0) (2026-07-20)
+
+
+### Features
+
+* add +cd flag (checking disabled) for DNSSEC debugging ([#80](https://github.com/dantech2000/digg/issues/80)) ([5779e72](https://github.com/dantech2000/digg/commit/5779e72a79883d3da426bd06b90837e2225c2a30)), closes [#75](https://github.com/dantech2000/digg/issues/75)
+* validate NSEC/NSEC3 denial of existence in +validate (phase 3) ([#84](https://github.com/dantech2000/digg/issues/84)) ([372e969](https://github.com/dantech2000/digg/commit/372e96978813c4ebc08892923d1f122efd7ae41e)), closes [#74](https://github.com/dantech2000/digg/issues/74)
+
+
+### Bug Fixes
+
+* document +nocd and enforce drift checks in CI ([#82](https://github.com/dantech2000/digg/issues/82)) ([e0c76b4](https://github.com/dantech2000/digg/commit/e0c76b4877658cb07a25803b9494840d19c1e3e7))
+
 ## [0.4.0](https://github.com/dantech2000/digg/compare/v0.3.1...v0.4.0) (2026-07-19)
 
 
