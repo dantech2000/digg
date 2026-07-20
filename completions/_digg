@@ -19,6 +19,7 @@ _digg() {
         '+dnssec[request DNSSEC records]'
         '+validate[validate the DNSSEC chain locally]'
         '+cd[checking disabled: get bogus data past a validating resolver]'
+        '+nocd[clear the checking-disabled bit]'
         '+dot[DNS-over-TLS]'
         '+edns[enable EDNS]' '+noedns[disable EDNS]'
         '+nsid[request server identifier]'
