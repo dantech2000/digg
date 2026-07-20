@@ -119,6 +119,8 @@ Request DNSSEC records (sets the DO bit).
 Validate the DNSSEC chain of trust locally, from the answer's signing
 zone up to the built-in IANA root anchors, without trusting the
 resolver's AD bit.
+Positive answers, and negative answers (NXDOMAIN / NODATA) via their
+NSEC or NSEC3 denial-of-existence proofs, are both validated.
 Reports each link and an overall SECURE, INSECURE, or BOGUS status.
 Implies
 .Cm +dnssec .
