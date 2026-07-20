@@ -21,6 +21,9 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
       - run: cargo build --release
+      # Fail if a CLI flag is undocumented in the man page or completions.
+      - run: ./scripts/man-check.sh
+      - run: ./scripts/completions-check.sh
 
   coverage:
     runs-on: ubuntu-latest
