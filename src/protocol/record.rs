@@ -291,7 +291,7 @@ impl fmt::Display for RData {
     }
 }
 
-fn base32_encode_hex(data: &[u8]) -> String {
+pub(crate) fn base32_encode_hex(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
     let mut result = String::new();
     let mut bits: u64 = 0;

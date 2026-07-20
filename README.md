@@ -242,7 +242,7 @@ stdout and per-query failures to stderr, so pipelines see clean data.
 | `+dot`         | DNS-over-TLS                             |
 | `+doh[=NAME]`  | DNS-over-HTTPS (cloudflare, google, quad9, opendns, adguard, wikimedia, or a URL) |
 | `+dnssec`      | Request DNSSEC records                   |
-| `+validate`    | Validate the DNSSEC chain of trust locally |
+| `+validate`    | Validate the DNSSEC chain locally (incl. NSEC/NSEC3 negative answers) |
 | `+cd`          | Checking disabled (fetch DNSSEC-bogus data) |
 | `+subnet=IP[/N]` | EDNS Client Subnet (RFC 7871); `+subnet=0` opts out |
 | `+nsid`        | Request the server identifier (RFC 5001) |
