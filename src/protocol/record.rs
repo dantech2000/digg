@@ -838,18 +838,22 @@ fn parse_type_bitmaps(buf: &[u8], offset: usize, length: usize) -> Vec<RecordTyp
     let mut pos = offset;
     let end = offset + length;
     while pos + 2 <= end {
-        let window = buf[pos] as u16;
+        let window = buf[pos] as u32;
         let bitmap_len = buf[pos + 1] as usize;
         pos += 2;
         if pos + bitmap_len > end {
             break;
         }
-        for i in 0..bitmap_len {
+        // A window covers at most 256 types = 32 bitmap bytes (RFC 4034 §4.1.2).
+        // A longer block is malformed; ignore the excess so the type number
+        // (window*256 + bit index) can never exceed u16::MAX. Computing in u32
+        // also avoids the overflow a hostile bitmap would otherwise cause.
+        for i in 0..bitmap_len.min(32) {
             let byte = buf[pos + i];
-            for bit in 0..8u16 {
+            for bit in 0..8u32 {
                 if byte & (0x80 >> bit) != 0 {
-                    let type_num = window * 256 + (i as u16) * 8 + bit;
-                    types.push(RecordType::from_u16(type_num));
+                    let type_num = window * 256 + (i as u32) * 8 + bit;
+                    types.push(RecordType::from_u16(type_num as u16));
                 }
             }
         }
@@ -1257,6 +1261,19 @@ mod tests {
         let buf = vec![0x01, 0x01, 0x40];
         let types = parse_type_bitmaps(&buf, 0, 3);
         assert_eq!(types, vec![RecordType::CAA]);
+    }
+
+    #[test]
+    fn type_bitmap_oversized_block_does_not_overflow() {
+        // Regression: window 255 with a bitmap block longer than 32 bytes
+        // used to overflow the u16 type-number computation (panic in debug,
+        // silent wrap in release). Found by cargo-fuzz. Must not panic and
+        // must not emit nonsense wrapped type numbers.
+        let mut buf = vec![0xFF, 40]; // window 255, claims 40 bitmap bytes
+        buf.extend(std::iter::repeat_n(0xFFu8, 40));
+        let types = parse_type_bitmaps(&buf, 0, buf.len());
+        // Only the first 32 bytes (types 65280..=65535) are considered.
+        assert!(types.iter().all(|t| t.to_u16() >= 65280));
     }
 
     #[test]
