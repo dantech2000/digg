@@ -56,35 +56,94 @@ pub fn send_dot_query(
 
     let start = Instant::now();
 
-    // Same wire format as DNS-over-TCP: 2-byte length prefix
-    let len = (query.len() as u16).to_be_bytes();
-    tls_stream
-        .write_all(&len)
-        .map_err(|e| DnsError::Network(format!("DoT send failed: {}", e)))?;
-    tls_stream
-        .write_all(query)
-        .map_err(|e| DnsError::Network(format!("DoT send failed: {}", e)))?;
-
-    // Read 2-byte length prefix
-    let mut len_buf = [0u8; 2];
-    tls_stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| DnsError::Network(format!("DoT read failed: {}", e)))?;
-    let resp_len = u16::from_be_bytes(len_buf) as usize;
-
-    // Read response
-    let mut resp_buf = vec![0u8; resp_len];
-    tls_stream
-        .read_exact(&mut resp_buf)
-        .map_err(|e| DnsError::Network(format!("DoT read failed: {}", e)))?;
+    write_framed_query(&mut tls_stream, query)?;
+    let resp_buf = read_framed_response(&mut tls_stream)?;
 
     let elapsed = start.elapsed();
+    let bytes = resp_buf.len();
     let message = DnsMessage::parse(&resp_buf)?;
 
     Ok(QueryResult {
         message,
         elapsed,
-        bytes: resp_len,
+        bytes,
         protocol: TransportProtocol::DoT,
     })
+}
+
+/// Write a query with the DNS-over-TCP 2-byte length prefix (RFC 7858 uses
+/// the same framing as DNS-over-TCP). Generic over the stream so the framing
+/// is testable without a TLS connection.
+fn write_framed_query<W: Write>(stream: &mut W, query: &[u8]) -> Result<(), DnsError> {
+    let len = (query.len() as u16).to_be_bytes();
+    stream
+        .write_all(&len)
+        .and_then(|_| stream.write_all(query))
+        .map_err(|e| DnsError::Network(format!("DoT send failed: {}", e)))
+}
+
+/// Read a length-prefixed response. A short or truncated stream is a network
+/// error, never a panic.
+fn read_framed_response<R: Read>(stream: &mut R) -> Result<Vec<u8>, DnsError> {
+    let mut len_buf = [0u8; 2];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|e| DnsError::Network(format!("DoT read failed: {}", e)))?;
+    let resp_len = u16::from_be_bytes(len_buf) as usize;
+
+    let mut resp_buf = vec![0u8; resp_len];
+    stream
+        .read_exact(&mut resp_buf)
+        .map_err(|e| DnsError::Network(format!("DoT read failed: {}", e)))?;
+    Ok(resp_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn dot_hostname_maps_known_resolver_ips_to_sni() {
+        assert_eq!(resolve_dot_hostname("1.1.1.1"), "cloudflare-dns.com");
+        assert_eq!(resolve_dot_hostname("8.8.4.4"), "dns.google");
+        assert_eq!(resolve_dot_hostname("9.9.9.9"), "dns.quad9.net");
+        // Unknown servers pass through unchanged (used verbatim as the SNI).
+        assert_eq!(resolve_dot_hostname("dns.example.net"), "dns.example.net");
+    }
+
+    #[test]
+    fn framing_round_trips_through_an_in_memory_stream() {
+        let query = b"\x12\x34hello-dns-payload";
+        let mut wire = Vec::new();
+        write_framed_query(&mut wire, query).unwrap();
+        // 2-byte big-endian length prefix, then the payload.
+        assert_eq!(&wire[..2], &(query.len() as u16).to_be_bytes());
+        assert_eq!(&wire[2..], query);
+
+        let mut reader = Cursor::new(wire);
+        // The reader frames the *response*; feed our framed bytes back as if
+        // they were a response and confirm we recover the payload exactly.
+        let got = read_framed_response(&mut reader).unwrap();
+        assert_eq!(got, query);
+    }
+
+    #[test]
+    fn read_framed_response_errors_on_truncated_prefix() {
+        let mut reader = Cursor::new(vec![0x00]); // only 1 of 2 length bytes
+        assert!(read_framed_response(&mut reader).is_err());
+    }
+
+    #[test]
+    fn read_framed_response_errors_when_body_shorter_than_prefix() {
+        // Prefix claims 10 bytes, only 3 follow.
+        let mut reader = Cursor::new(vec![0x00, 0x0A, 1, 2, 3]);
+        assert!(read_framed_response(&mut reader).is_err());
+    }
+
+    #[test]
+    fn read_framed_response_handles_zero_length_body() {
+        let mut reader = Cursor::new(vec![0x00, 0x00]);
+        assert_eq!(read_framed_response(&mut reader).unwrap(), Vec::<u8>::new());
+    }
 }
