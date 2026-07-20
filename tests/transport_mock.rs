@@ -378,3 +378,48 @@ fn tsv_output_is_stable_tab_separated_lines() {
         "example.com.\t60\tIN\tA\t1.2.3.4\nexample.com.\t60\tIN\tA\t5.6.7.8\n"
     );
 }
+
+#[test]
+fn cd_flag_sets_the_checking_disabled_bit_on_the_wire() {
+    use std::net::UdpSocket;
+    use std::sync::mpsc;
+    // A one-shot capturing server: record the query's flags2 byte, then answer.
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let port = socket.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        let (n, peer) = socket.recv_from(&mut buf).unwrap();
+        // flags2 is byte index 3; CD is 0x10.
+        let _ = tx.send(buf[3]);
+        // Minimal NOERROR answer echoing the question.
+        if let Some(resp) = build_response(&buf[..n], Behavior::Answer(&[[1, 2, 3, 4]])) {
+            let _ = socket.send_to(&resp, peer);
+        }
+    });
+
+    let out = Command::new(env!("CARGO_BIN_EXE_digg"))
+        .args([
+            "@127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "example.com",
+            "+cd",
+            "+noedns",
+            "+nocolor",
+            "+short",
+        ])
+        .env("HOME", std::env::temp_dir())
+        .output()
+        .expect("run digg");
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let flags2 = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("query captured");
+    assert_eq!(
+        flags2 & 0x10,
+        0x10,
+        "CD bit should be set (flags2=0x{:02x})",
+        flags2
+    );
+}

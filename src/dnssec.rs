@@ -64,6 +64,7 @@ pub struct ValidationReport {
 
 /// Validate the answer's chain of trust by issuing our own DNSKEY/DS
 /// queries through the given resolver and verifying everything locally.
+#[allow(clippy::too_many_arguments)]
 pub fn validate(
     server: &str,
     port: u16,
@@ -71,6 +72,7 @@ pub fn validate(
     qname: &str,
     qtype: RecordType,
     timeout: Duration,
+    cd: bool,
 ) -> Result<ValidationReport, DnsError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -81,8 +83,14 @@ pub fn validate(
             dnssec_ok: true,
             ..EdnsOptions::default()
         };
-        let (query, id) =
-            DnsMessage::build_query_with_class(name, rtype, RecordClass::IN, true, Some(&edns))?;
+        let (query, id) = DnsMessage::build_query_with_class(
+            name,
+            rtype,
+            RecordClass::IN,
+            true,
+            cd,
+            Some(&edns),
+        )?;
         let result = transport::send_query_with_retries(server, port, &query, false, timeout, 2)?;
         transport::verify_id(&result.message.header, id)?;
         Ok(result.message)
