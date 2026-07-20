@@ -18,6 +18,7 @@ _digg() {
         '+trace[trace delegation from root]'
         '+dnssec[request DNSSEC records]'
         '+validate[validate the DNSSEC chain locally]'
+        '+cd[checking disabled: get bogus data past a validating resolver]'
         '+dot[DNS-over-TLS]'
         '+edns[enable EDNS]' '+noedns[disable EDNS]'
         '+nsid[request server identifier]'

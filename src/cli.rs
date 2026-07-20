@@ -45,6 +45,7 @@ pub struct Options {
     pub batch_file: Option<String>,
     pub dnssec: bool,
     pub validate: bool,
+    pub cd: bool,
     pub edns: bool,
     pub doh: Option<String>,
     pub dot: bool,
@@ -86,6 +87,7 @@ impl Default for Options {
             batch_file: None,
             dnssec: false,
             validate: false,
+            cd: false,
             edns: true,
             doh: None,
             dot: false,
@@ -342,6 +344,8 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
         "+noadditional" => opts.show_additional = false,
         "+trace" => opts.trace = true,
         "+dnssec" => opts.dnssec = true,
+        "+cd" => opts.cd = true,
+        "+nocd" => opts.cd = false,
         "+validate" => {
             opts.validate = true;
             opts.dnssec = true;
@@ -552,6 +556,7 @@ pub fn print_usage() {
 {bold}SECURITY:{reset}
     {yellow}+dnssec{reset}         Request DNSSEC records (sets DO bit)
     {yellow}+validate{reset}       Validate the DNSSEC chain of trust locally
+    {yellow}+cd{reset}             Set checking-disabled (get bogus data past a validating resolver)
     {yellow}+dot{reset}            Use DNS-over-TLS (port 853)
     {yellow}+doh{reset}            Use DNS-over-HTTPS {dim}(Cloudflare){reset}
     {yellow}+doh=NAME{reset}       DoH via a known provider: {providers}
@@ -1113,5 +1118,14 @@ mod tests {
         assert!(opts.validate);
         assert!(opts.dnssec);
         assert!(parse_err(&["e.com", "+validate", "+noedns"]).contains("+validate requires EDNS"));
+    }
+
+    // === +cd ===
+
+    #[test]
+    fn cd_flag_parses_with_last_wins() {
+        assert!(parse(&["e.com", "+cd"]).cd);
+        assert!(!parse(&["e.com"]).cd);
+        assert!(!parse(&["e.com", "+cd", "+nocd"]).cd);
     }
 }

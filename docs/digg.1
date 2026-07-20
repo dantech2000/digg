@@ -122,6 +122,11 @@ resolver's AD bit.
 Reports each link and an overall SECURE, INSECURE, or BOGUS status.
 Implies
 .Cm +dnssec .
+.It Cm +cd
+Set the checking-disabled (CD) bit so a validating resolver returns
+DNSSEC-bogus data instead of SERVFAIL; pairs with
+.Cm +validate
+to diagnose which link is broken.
 .It Cm +dot
 DNS-over-TLS on port 853.
 .It Cm +doh Ns Op = Ns Ar provider|URL

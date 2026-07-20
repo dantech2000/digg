@@ -205,6 +205,7 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
             *qtype,
             opts.qclass,
             opts.recurse,
+            opts.cd,
             edns.as_ref(),
         )?;
 
@@ -258,8 +259,15 @@ fn run(args: &[String]) -> Result<i32, DnsError> {
         }
 
         if opts.validate && !opts.json && !opts.yaml && !opts.tsv {
-            let report =
-                dnssec::validate(&server, opts.port, &result.message, name, *qtype, timeout)?;
+            let report = dnssec::validate(
+                &server,
+                opts.port,
+                &result.message,
+                name,
+                *qtype,
+                timeout,
+                opts.cd,
+            )?;
             output::print_validation(&report);
             if matches!(report.status, dnssec::ChainStatus::Bogus(_)) {
                 exit_code = exit_code.max(2);

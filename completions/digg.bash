@@ -4,7 +4,7 @@ _digg() {
 
     local plus_flags="+short +json +yaml +tsv +compat +qr +noqr +stats +nostats \
 +color +nocolor +tcp +notcp +recurse +norecurse +authority +noauthority \
-+additional +noadditional +trace +dnssec +validate +dot +edns +noedns +nsid \
++additional +noadditional +trace +dnssec +validate +cd +nocd +dot +edns +noedns +nsid \
 +idnin +noidnin +idnout +noidnout +propagation +prop +bench +watch +doh \
 +timeout= +retry= +bench= +watch= +doh= +subnet="
     local dash_flags="-x -p -c -f -h -V --help --version"

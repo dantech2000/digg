@@ -24,7 +24,7 @@ impl DnsMessage {
         rd: bool,
         edns_opts: Option<&EdnsOptions>,
     ) -> Result<(Vec<u8>, u16), DnsError> {
-        Self::build_query_with_class(name, qtype, RecordClass::IN, rd, edns_opts)
+        Self::build_query_with_class(name, qtype, RecordClass::IN, rd, false, edns_opts)
     }
 
     pub fn build_query_with_class(
@@ -32,11 +32,13 @@ impl DnsMessage {
         qtype: RecordType,
         qclass: RecordClass,
         rd: bool,
+        cd: bool,
         edns_opts: Option<&EdnsOptions>,
     ) -> Result<(Vec<u8>, u16), DnsError> {
         let mut rng = rand::thread_rng();
         let id: u16 = rng.gen();
         let mut header = Header::new_query(id, rd);
+        header.cd = cd;
 
         if edns_opts.is_some() {
             header.arcount = 1;
