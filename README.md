@@ -32,6 +32,10 @@ conventional commits (`fix:` for a patch, `feat:` for a minor, and `!` for a
 breaking change). It maintains a release PR that updates `Cargo.toml` and
 `CHANGELOG.md`; merging that PR creates the tag and starts the release workflow.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, testing conventions, and fuzzing (`cargo +nightly fuzz run`).
+
 ## Shell completions
 
 Completion scripts for bash, zsh, and fish live in [`completions/`](completions/)
