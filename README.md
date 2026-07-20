@@ -4,6 +4,23 @@ A modern DNS lookup CLI tool written in Rust. Like `dig`, but with built-in supp
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
+## Changed in v0.5.0
+
+> [!IMPORTANT]
+> One behavior difference from v0.4.0 that existing `+validate` users will notice. See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+**Changed**
+
+- **`+validate` now validates negative answers.** An `NXDOMAIN` or `NODATA` response is checked against its `NSEC` / `NSEC3` denial-of-existence proof. Earlier versions could only report `INSECURE (no answer to validate)` for these; now they report `SECURE` when the denial is proven, or `BOGUS` (exit code `2`) when it fails. Scripts that keyed off the old `INSECURE` string for negative answers should be updated.
+
+**Added**
+
+- **`+cd`** — set the DNSSEC checking-disabled bit so a validating resolver returns bogus data for `+validate` to diagnose, instead of `SERVFAIL`.
+
+**Fixed**
+
+- Malformed `NSEC` / `NSEC3` type bitmaps (oversized per-window blocks) are now parsed defensively, instead of producing wrapped record-type numbers in release builds.
+
 ## Install
 
 ```sh
