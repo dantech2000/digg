@@ -41,7 +41,7 @@ completions-check:
 
 # Coverage summary (requires cargo-llvm-cov; matches the CI ratchet)
 coverage:
-    cargo llvm-cov --fail-under-lines 72 --summary-only
+    cargo llvm-cov --fail-under-lines 78 --summary-only
 
 # Run digg, e.g. `just run example.com +short`
 run *ARGS:

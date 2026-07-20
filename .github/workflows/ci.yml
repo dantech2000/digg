@@ -39,8 +39,8 @@ jobs:
       # Ratchet, not a target: the threshold tracks the real floor and is
       # bumped in the same PR that raises coverage. Never set it above
       # what the suite actually measures.
-      - name: Coverage (fail under 72% lines)
-        run: cargo llvm-cov --fail-under-lines 72 --summary-only 2>&1 | tee coverage.txt
+      - name: Coverage (fail under 78% lines)
+        run: cargo llvm-cov --fail-under-lines 78 --summary-only 2>&1 | tee coverage.txt
       - name: Publish summary
         if: always()
         run: |
