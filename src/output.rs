@@ -5,7 +5,7 @@ use crate::protocol::record::{RData, ResourceRecord};
 use crate::protocol::types::Rcode;
 use crate::trace::TraceHop;
 use crate::transport::QueryResult;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 // ANSI color codes
@@ -123,6 +123,21 @@ impl Painter {
             text.to_string()
         }
     }
+}
+
+/// Render to locked, buffered stdout. Every `print_*` entry point funnels
+/// through here, so buffering and color setup live in exactly one place and a
+/// new output format cannot forget either.
+///
+/// A bare `StdoutLock` is a `LineWriter`, which issues one `write` syscall per
+/// newline — costly for the bulk formats (AXFR, trace, propagation). The
+/// `BufWriter` is created and dropped within this call, so flush boundaries
+/// stay exactly where they were: interactive modes like `+watch` still flush
+/// once per update.
+fn emit(render: impl FnOnce(&mut BufWriter<io::StdoutLock<'static>>, &Painter)) {
+    let painter = Painter::new();
+    let mut out = BufWriter::new(io::stdout().lock());
+    render(&mut out, &painter);
 }
 
 #[cfg(test)]
@@ -740,9 +755,7 @@ mod tests {
 // === Standard output ===
 
 pub fn print_short(result: &QueryResult) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_short(&mut out, result);
+    emit(|out, _| write_short(out, result));
 }
 
 pub fn write_short<W: Write>(out: &mut W, result: &QueryResult) {
@@ -752,10 +765,7 @@ pub fn write_short<W: Write>(out: &mut W, result: &QueryResult) {
 }
 
 pub fn print_query(message: &crate::protocol::message::DnsMessage, server: &str, port: u16) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_query(&mut out, &painter, message, server, port);
+    emit(|out, painter| write_query(out, painter, message, server, port));
 }
 
 /// Render the outgoing query (+qr). The message is the parsed form of the
@@ -826,19 +836,18 @@ pub fn print_full(
     show_additional: bool,
     show_stats: bool,
 ) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_full(
-        &mut out,
-        &painter,
-        result,
-        server,
-        port,
-        show_authority,
-        show_additional,
-        show_stats,
-    );
+    emit(|out, painter| {
+        write_full(
+            out,
+            painter,
+            result,
+            server,
+            port,
+            show_authority,
+            show_additional,
+            show_stats,
+        )
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -935,10 +944,7 @@ pub fn write_full<W: Write>(
 // === DNSSEC validation output ===
 
 pub fn print_validation(report: &crate::dnssec::ValidationReport) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_validation(&mut out, &painter, report);
+    emit(|out, painter| write_validation(out, painter, report));
 }
 
 pub fn write_validation<W: Write>(
@@ -973,9 +979,7 @@ pub fn write_validation<W: Write>(
 // === TSV output ===
 
 pub fn print_tsv(result: &QueryResult) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_tsv(&mut out, result);
+    emit(|out, _| write_tsv(out, result));
 }
 
 /// Stable machine-readable format: one answer record per line,
@@ -1017,13 +1021,11 @@ fn escape_tsv_field(value: &str) -> String {
 // === Classic dig-compatible output (+compat) ===
 
 pub fn print_compat(result: &QueryResult, server: &str, port: u16, opts: &CompatOptions) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let when = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    write_compat(&mut out, result, server, port, when, opts);
+    emit(|out, _| write_compat(out, result, server, port, when, opts));
 }
 
 pub struct CompatOptions {
@@ -1175,9 +1177,7 @@ fn format_dig_when(epoch: u64) -> String {
 // === JSON output ===
 
 pub fn print_json(result: &QueryResult) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_json(&mut out, result);
+    emit(|out, _| write_json(out, result));
 }
 
 pub fn write_json<W: Write>(out: &mut W, result: &QueryResult) {
@@ -1193,9 +1193,7 @@ pub fn write_json<W: Write>(out: &mut W, result: &QueryResult) {
 // === YAML output ===
 
 pub fn print_yaml(result: &QueryResult) {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_yaml(&mut out, result);
+    emit(|out, _| write_yaml(out, result));
 }
 
 pub fn write_yaml<W: Write>(out: &mut W, result: &QueryResult) {
@@ -1230,10 +1228,7 @@ impl<'a> JsonOutput<'a> {
 // === Trace output ===
 
 pub fn print_trace(hops: &[TraceHop]) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_trace(&mut out, &painter, hops);
+    emit(|out, painter| write_trace(out, painter, hops));
 }
 
 pub fn write_trace<W: Write>(out: &mut W, painter: &Painter, hops: &[TraceHop]) {
@@ -1274,10 +1269,7 @@ pub fn write_trace<W: Write>(out: &mut W, painter: &Painter, hops: &[TraceHop]) 
 // === Benchmark output ===
 
 pub fn print_bench(result: &BenchResult, server: &str, name: &str, qtype: &str) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_bench(&mut out, &painter, result, server, name, qtype);
+    emit(|out, painter| write_bench(out, painter, result, server, name, qtype));
 }
 
 pub fn write_bench<W: Write>(
@@ -1353,10 +1345,7 @@ pub fn write_bench<W: Write>(
 // === AXFR output ===
 
 pub fn print_axfr(records: &[ResourceRecord]) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_axfr(&mut out, &painter, records);
+    emit(|out, painter| write_axfr(out, painter, records));
 }
 
 pub fn write_axfr<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceRecord]) {
@@ -1376,10 +1365,7 @@ pub fn write_axfr<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceR
 // === Comparison output ===
 
 pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_comparison(&mut out, &painter, results, name, qtype);
+    emit(|out, painter| write_comparison(out, painter, results, name, qtype));
 }
 
 pub fn write_comparison<W: Write>(
@@ -1477,10 +1463,7 @@ pub fn print_batch_result(
     qtype: &crate::protocol::types::RecordType,
     result: &Result<QueryResult, crate::error::DnsError>,
 ) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_batch_result(&mut out, &painter, name, qtype, result);
+    emit(|out, painter| write_batch_result(out, painter, name, qtype, result));
 }
 
 pub fn write_batch_result<W: Write>(
@@ -1525,10 +1508,7 @@ pub fn write_batch_result<W: Write>(
 // === Propagation output ===
 
 pub fn print_propagation(results: &[PropagationResult], name: &str, qtype: &str) {
-    let painter = Painter::new();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    write_propagation(&mut out, &painter, results, name, qtype);
+    emit(|out, painter| write_propagation(out, painter, results, name, qtype));
 }
 
 pub fn write_propagation<W: Write>(
