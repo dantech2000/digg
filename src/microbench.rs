@@ -238,6 +238,101 @@ fn microbench_format_ttl() {
     report("format_ttl x10k", stats, 10_000);
 }
 
+// === Wire-parsing benches ===
+
+/// Append a name in uncompressed wire form (length-prefixed labels, root 0).
+fn encode_name(out: &mut Vec<u8>, name: &str) {
+    for label in name.trim_end_matches('.').split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+}
+
+fn push_record(out: &mut Vec<u8>, name: &str, rtype: u16, ttl: u32, rdata: &[u8]) {
+    encode_name(out, name);
+    out.extend_from_slice(&rtype.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes()); // class IN
+    out.extend_from_slice(&ttl.to_be_bytes());
+    out.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    out.extend_from_slice(rdata);
+}
+
+/// A wire buffer of `n` records spanning the parser's distinct shapes: fixed
+/// width (A/AAAA), embedded name (MX), length-prefixed strings (TXT), and the
+/// two-name-plus-five-u32 SOA, which is the heaviest byte-assembly arm.
+fn wire_zone(n: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        let name = format!("host{:05}.example.com.", i);
+        match i % 5 {
+            0 => push_record(&mut out, &name, 1, 3600, &[192, 0, 2, (i % 256) as u8]),
+            1 => {
+                let mut rd = [0u8; 16];
+                rd[0..2].copy_from_slice(&[0x20, 0x01]);
+                rd[15] = (i % 256) as u8;
+                push_record(&mut out, &name, 28, 3600, &rd);
+            }
+            2 => {
+                let mut rd = Vec::new();
+                rd.extend_from_slice(&10u16.to_be_bytes());
+                encode_name(&mut rd, "mail.example.com.");
+                push_record(&mut out, &name, 15, 3600, &rd);
+            }
+            3 => {
+                let text = format!("v=spf1 include:_spf{}.example.com ~all", i % 3);
+                let mut rd = vec![text.len() as u8];
+                rd.extend_from_slice(text.as_bytes());
+                push_record(&mut out, &name, 16, 3600, &rd);
+            }
+            _ => {
+                let mut rd = Vec::new();
+                encode_name(&mut rd, "ns1.example.com.");
+                encode_name(&mut rd, "hostmaster.example.com.");
+                for v in [2024010101u32, 7200, 3600, 1209600, 300] {
+                    rd.extend_from_slice(&v.to_be_bytes());
+                }
+                push_record(&mut out, &name, 6, 3600, &rd);
+            }
+        }
+    }
+    out
+}
+
+fn decode_all(wire: &[u8]) -> Vec<ResourceRecord> {
+    let mut records = Vec::new();
+    let mut offset = 0;
+    while offset < wire.len() {
+        let (rr, used) = ResourceRecord::decode(wire, offset).expect("fixture wire is well-formed");
+        offset += used;
+        records.push(rr);
+    }
+    records
+}
+
+#[test]
+#[ignore = "benchmark; run with --ignored"]
+fn microbench_record_decode() {
+    let wire = wire_zone(ZONE_N);
+    let records = decode_all(&wire);
+    assert_eq!(records.len(), ZONE_N, "fixture should round-trip");
+
+    println!("\nwire parsing, {ZONE_N} records:");
+
+    let stats = measure(WARMUP, SAMPLES, || {
+        black_box(decode_all(black_box(&wire)).len());
+    });
+    report("ResourceRecord::decode", stats, ZONE_N);
+
+    // Display is what output.rs calls per record via rdata.to_string().
+    let stats = measure(WARMUP, SAMPLES, || {
+        for rr in &records {
+            black_box(rr.rdata.to_string());
+        }
+    });
+    report("RData Display (to_string)", stats, ZONE_N);
+}
+
 // === I/O strategy benches (real file descriptor) ===
 
 /// Writing to a real fd is where the LineWriter-vs-BufWriter difference lives:
