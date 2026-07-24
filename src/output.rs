@@ -1661,9 +1661,20 @@ pub fn write_propagation<W: Write>(
 // === Shared helpers ===
 
 fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceRecord]) {
-    let type_width = records
+    // Column widths need every field rendered before the first row is written,
+    // so render type and TTL once here and measure those strings. The previous
+    // version built them a second time purely to call .len(), which meant
+    // format_ttl ran twice per record. Names are measured from the raw field
+    // rather than being buffered, to keep the extra allocation to two small
+    // strings per record.
+    let formatted: Vec<(String, String)> = records
         .iter()
-        .map(|r| r.rtype.to_string().len())
+        .map(|rr| (rr.rtype.to_string(), format_ttl(rr.ttl)))
+        .collect();
+
+    let type_width = formatted
+        .iter()
+        .map(|f| f.0.len())
         .max()
         .unwrap_or(4)
         .max(4);
@@ -1673,9 +1684,9 @@ fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[Resou
         .max()
         .unwrap_or(4)
         .max(4);
-    let ttl_width = records
+    let ttl_width = formatted
         .iter()
-        .map(|r| format_ttl(r.ttl).len())
+        .map(|f| f.1.len())
         .max()
         .unwrap_or(3)
         .max(3);
@@ -1693,19 +1704,19 @@ fn print_record_table<W: Write>(out: &mut W, painter: &Painter, records: &[Resou
         painter.paint(DIM, "VALUE"),
     );
 
-    for rr in records {
-        let type_pad = format!("{:<1$}", rr.rtype, type_width);
+    for (rr, (type_text, ttl_text)) in records.iter().zip(&formatted) {
+        // Padding goes inside the color codes, matching the header row.
+        let type_pad = format!("{:<1$}", type_text, type_width);
         let name_pad = format!("{:<1$}", display_name(&rr.name), name_width);
-        let ttl_pad = format!("{:<1$}", format_ttl(rr.ttl), ttl_width);
-        let type_str = painter.paint(BOLD_CYAN, &type_pad);
-        let name_str = name_pad;
-        let ttl_str = painter.paint(DIM, &ttl_pad);
-        let value_str = format_rdata_colored(painter, &rr.rdata);
+        let ttl_pad = format!("{:<1$}", ttl_text, ttl_width);
 
         let _ = writeln!(
             out,
             " {}   {}   {}   {}",
-            type_str, name_str, ttl_str, value_str,
+            painter.paint(BOLD_CYAN, &type_pad),
+            name_pad,
+            painter.paint(DIM, &ttl_pad),
+            format_rdata_colored(painter, &rr.rdata),
         );
     }
 }
