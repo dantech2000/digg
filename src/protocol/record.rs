@@ -719,13 +719,11 @@ fn format_svc_param(param: &SvcParam) -> String {
     match param.key {
         0 => {
             // mandatory: list of u16 key IDs
-            let mut keys = Vec::new();
-            let mut i = 0;
-            while i + 2 <= param.value.len() {
-                let k = be_u16(&param.value, i);
-                keys.push(svc_param_key_name(k));
-                i += 2;
-            }
+            let keys: Vec<String> = param
+                .value
+                .chunks_exact(2)
+                .map(|k| svc_param_key_name(be_u16(k, 0)))
+                .collect();
             format!("mandatory={}", keys.join(","))
         }
         1 => {
@@ -757,18 +755,11 @@ fn format_svc_param(param: &SvcParam) -> String {
         }
         4 => {
             // ipv4hint: concatenated 4-byte IPv4 addrs
-            let mut addrs = Vec::new();
-            let mut i = 0;
-            while i + 4 <= param.value.len() {
-                let addr = Ipv4Addr::new(
-                    param.value[i],
-                    param.value[i + 1],
-                    param.value[i + 2],
-                    param.value[i + 3],
-                );
-                addrs.push(addr.to_string());
-                i += 4;
-            }
+            let addrs: Vec<String> = param
+                .value
+                .chunks_exact(4)
+                .map(|a| Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
+                .collect();
             format!("ipv4hint={}", addrs.join(","))
         }
         5 => {
@@ -777,15 +768,14 @@ fn format_svc_param(param: &SvcParam) -> String {
         }
         6 => {
             // ipv6hint: concatenated 16-byte IPv6 addrs
-            let mut addrs = Vec::new();
-            let mut i = 0;
-            while i + 16 <= param.value.len() {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&param.value[i..i + 16]);
-                let addr = Ipv6Addr::from(octets);
-                addrs.push(addr.to_string());
-                i += 16;
-            }
+            let addrs: Vec<String> = param
+                .value
+                .chunks_exact(16)
+                .map(|a| {
+                    let octets: [u8; 16] = a.try_into().expect("chunks_exact(16) yields 16 bytes");
+                    Ipv6Addr::from(octets).to_string()
+                })
+                .collect();
             format!("ipv6hint={}", addrs.join(","))
         }
         n => {
