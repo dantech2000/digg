@@ -100,6 +100,21 @@ pub struct SvcParam {
     pub value: Vec<u8>,
 }
 
+/// Read a big-endian u16/u32 out of `buf` at `at`.
+///
+/// The wire format is big-endian throughout, and spelling each read out in
+/// full cost six lines apiece in the SOA and RRSIG arms. Callers are
+/// responsible for bounds: every call site sits behind an explicit rdlength
+/// or buffer-length guard, and an out-of-range index panics rather than
+/// silently reading an adjacent field.
+fn be_u16(buf: &[u8], at: usize) -> u16 {
+    u16::from_be_bytes([buf[at], buf[at + 1]])
+}
+
+fn be_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
 fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
@@ -365,10 +380,10 @@ impl ResourceRecord {
             return Err(DnsError::Protocol("truncated resource record".into()));
         }
 
-        let rtype = RecordType::from_u16(u16::from_be_bytes([buf[pos], buf[pos + 1]]));
-        let rclass = RecordClass::from_u16(u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]));
-        let ttl = u32::from_be_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
-        let rdlength = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        let rtype = RecordType::from_u16(be_u16(buf, pos));
+        let rclass = RecordClass::from_u16(be_u16(buf, pos + 2));
+        let ttl = be_u32(buf, pos + 4);
+        let rdlength = be_u16(buf, pos + 8) as usize;
 
         let rdata_start = pos + 10;
         if rdata_start + rdlength > buf.len() {
@@ -434,7 +449,7 @@ fn parse_rdata(
             if rdlength < 3 {
                 return Err(DnsError::Protocol("invalid MX record length".into()));
             }
-            let preference = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            let preference = be_u16(buf, offset);
             let (exchange, _) = decode_name(buf, offset + 2)?;
             Ok(RData::MX {
                 preference,
@@ -467,36 +482,11 @@ fn parse_rdata(
             if soa_offset + 20 > buf.len() {
                 return Err(DnsError::Protocol("truncated SOA record".into()));
             }
-            let serial = u32::from_be_bytes([
-                buf[soa_offset],
-                buf[soa_offset + 1],
-                buf[soa_offset + 2],
-                buf[soa_offset + 3],
-            ]);
-            let refresh = u32::from_be_bytes([
-                buf[soa_offset + 4],
-                buf[soa_offset + 5],
-                buf[soa_offset + 6],
-                buf[soa_offset + 7],
-            ]);
-            let retry = u32::from_be_bytes([
-                buf[soa_offset + 8],
-                buf[soa_offset + 9],
-                buf[soa_offset + 10],
-                buf[soa_offset + 11],
-            ]);
-            let expire = u32::from_be_bytes([
-                buf[soa_offset + 12],
-                buf[soa_offset + 13],
-                buf[soa_offset + 14],
-                buf[soa_offset + 15],
-            ]);
-            let minimum = u32::from_be_bytes([
-                buf[soa_offset + 16],
-                buf[soa_offset + 17],
-                buf[soa_offset + 18],
-                buf[soa_offset + 19],
-            ]);
+            let serial = be_u32(buf, soa_offset);
+            let refresh = be_u32(buf, soa_offset + 4);
+            let retry = be_u32(buf, soa_offset + 8);
+            let expire = be_u32(buf, soa_offset + 12);
+            let minimum = be_u32(buf, soa_offset + 16);
             Ok(RData::SOA {
                 mname,
                 rname,
@@ -511,9 +501,9 @@ fn parse_rdata(
             if rdlength < 7 {
                 return Err(DnsError::Protocol("invalid SRV record length".into()));
             }
-            let priority = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
-            let weight = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
-            let port = u16::from_be_bytes([buf[offset + 4], buf[offset + 5]]);
+            let priority = be_u16(buf, offset);
+            let weight = be_u16(buf, offset + 2);
+            let port = be_u16(buf, offset + 4);
             let (target, _) = decode_name(buf, offset + 6)?;
             Ok(RData::SRV {
                 priority,
@@ -540,7 +530,7 @@ fn parse_rdata(
             if rdlength < 4 {
                 return Err(DnsError::Protocol("invalid DS record length".into()));
             }
-            let key_tag = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            let key_tag = be_u16(buf, offset);
             let algorithm = buf[offset + 2];
             let digest_type = buf[offset + 3];
             let digest = buf[offset + 4..offset + rdlength].to_vec();
@@ -555,29 +545,13 @@ fn parse_rdata(
             if rdlength < 18 {
                 return Err(DnsError::Protocol("invalid RRSIG record length".into()));
             }
-            let type_covered =
-                RecordType::from_u16(u16::from_be_bytes([buf[offset], buf[offset + 1]]));
+            let type_covered = RecordType::from_u16(be_u16(buf, offset));
             let algorithm = buf[offset + 2];
             let labels = buf[offset + 3];
-            let original_ttl = u32::from_be_bytes([
-                buf[offset + 4],
-                buf[offset + 5],
-                buf[offset + 6],
-                buf[offset + 7],
-            ]);
-            let expiration = u32::from_be_bytes([
-                buf[offset + 8],
-                buf[offset + 9],
-                buf[offset + 10],
-                buf[offset + 11],
-            ]);
-            let inception = u32::from_be_bytes([
-                buf[offset + 12],
-                buf[offset + 13],
-                buf[offset + 14],
-                buf[offset + 15],
-            ]);
-            let key_tag = u16::from_be_bytes([buf[offset + 16], buf[offset + 17]]);
+            let original_ttl = be_u32(buf, offset + 4);
+            let expiration = be_u32(buf, offset + 8);
+            let inception = be_u32(buf, offset + 12);
+            let key_tag = be_u16(buf, offset + 16);
             let (signer, signer_len) = decode_name(buf, offset + 18)?;
             let sig_start = offset + 18 + signer_len;
             let sig_end = offset + rdlength;
@@ -602,7 +576,7 @@ fn parse_rdata(
             if rdlength < 4 {
                 return Err(DnsError::Protocol("invalid DNSKEY record length".into()));
             }
-            let flags = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+            let flags = be_u16(buf, offset);
             let protocol = buf[offset + 2];
             let algorithm = buf[offset + 3];
             let public_key = buf[offset + 4..offset + rdlength].to_vec();
@@ -630,7 +604,7 @@ fn parse_rdata(
             let rdata_end = offset + rdlength;
             let algorithm = buf[offset];
             let flags = buf[offset + 1];
-            let iterations = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
+            let iterations = be_u16(buf, offset + 2);
             let salt_len = buf[offset + 4] as usize;
             let salt_end = offset + 5 + salt_len;
             if salt_end > rdata_end {
@@ -667,7 +641,7 @@ fn parse_rdata(
             }
             let algorithm = buf[offset];
             let flags = buf[offset + 1];
-            let iterations = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]);
+            let iterations = be_u16(buf, offset + 2);
             let salt_len = buf[offset + 4] as usize;
             let salt_end = offset + 5 + salt_len;
             if salt_end > offset + rdlength {
@@ -712,14 +686,14 @@ fn parse_svcb_rdata(
             "invalid SVCB/HTTPS record length".into(),
         ));
     }
-    let priority = u16::from_be_bytes([buf[offset], buf[offset + 1]]);
+    let priority = be_u16(buf, offset);
     let (target, name_len) = decode_name(buf, offset + 2)?;
     let mut params = Vec::new();
     let mut pos = offset + 2 + name_len;
     let end = offset + rdlength;
     while pos + 4 <= end {
-        let key = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
-        let value_len = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
+        let key = be_u16(buf, pos);
+        let value_len = be_u16(buf, pos + 2) as usize;
         pos += 4;
         if pos + value_len > end {
             return Err(DnsError::Protocol(
@@ -748,7 +722,7 @@ fn format_svc_param(param: &SvcParam) -> String {
             let mut keys = Vec::new();
             let mut i = 0;
             while i + 2 <= param.value.len() {
-                let k = u16::from_be_bytes([param.value[i], param.value[i + 1]]);
+                let k = be_u16(&param.value, i);
                 keys.push(svc_param_key_name(k));
                 i += 2;
             }
@@ -775,7 +749,7 @@ fn format_svc_param(param: &SvcParam) -> String {
         3 => {
             // port: u16
             if param.value.len() >= 2 {
-                let port = u16::from_be_bytes([param.value[0], param.value[1]]);
+                let port = be_u16(&param.value, 0);
                 format!("port={}", port)
             } else {
                 "port=<invalid>".to_string()
