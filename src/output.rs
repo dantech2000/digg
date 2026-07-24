@@ -702,6 +702,35 @@ mod tests {
         assert!(text.contains("propagation complete"));
     }
 
+    /// Agreement among the resolvers that answered, plus an unreachable one.
+    /// This arm reports "complete" *and* the unreachable count; it had no
+    /// coverage before the summary branches were collapsed.
+    #[test]
+    fn write_propagation_reports_agreement_alongside_unreachable() {
+        let results = vec![
+            prop(
+                "Google",
+                "8.8.8.8",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            prop(
+                "Cloudflare",
+                "1.1.1.1",
+                Ok(fixture_result(vec![a_record("e.com.", 60, [1, 2, 3, 4])])),
+            ),
+            prop(
+                "Quad9",
+                "9.9.9.9",
+                Err(crate::error::DnsError::Network("unreachable".into())),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_propagation(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("2/3 resolvers agree"));
+        assert!(text.contains("propagation complete"));
+        assert!(text.contains("1 resolver(s) unreachable"));
+    }
+
     #[test]
     fn write_propagation_reports_disagreement_and_unreachable() {
         let results = vec![
@@ -1599,29 +1628,17 @@ pub fn write_propagation<W: Write>(
 
     let total = results.len();
     let successful = total - errors;
-    if answer_groups.len() == 1 && errors == 0 {
+    // A single answer group means every resolver that replied agrees; zero
+    // groups (all unreachable) falls through to the incomplete arm.
+    if answer_groups.len() == 1 {
         let _ = writeln!(
             out,
             " {}/{} resolvers agree {} propagation complete",
             successful,
             total,
             painter.paint(GREEN, "\u{2014}"),
-        );
-    } else if answer_groups.len() == 1 && errors > 0 {
-        let _ = writeln!(
-            out,
-            " {}/{} resolvers agree {} propagation complete",
-            successful,
-            total,
-            painter.paint(GREEN, "\u{2014}"),
-        );
-        let _ = writeln!(
-            out,
-            " {} resolver(s) unreachable",
-            painter.paint(RED, &errors.to_string()),
         );
     } else {
-        // Find the largest group
         let max_group = answer_groups.values().map(|v| v.len()).max().unwrap_or(0);
         let _ = writeln!(
             out,
@@ -1631,13 +1648,13 @@ pub fn write_propagation<W: Write>(
             painter.paint(YELLOW, "\u{2014}"),
             painter.paint(YELLOW, "propagation incomplete"),
         );
-        if errors > 0 {
-            let _ = writeln!(
-                out,
-                " {} resolver(s) unreachable",
-                painter.paint(RED, &errors.to_string()),
-            );
-        }
+    }
+    if errors > 0 {
+        let _ = writeln!(
+            out,
+            " {} resolver(s) unreachable",
+            painter.paint(RED, &errors.to_string()),
+        );
     }
     let _ = writeln!(out);
 }
