@@ -627,6 +627,55 @@ mod tests {
         }
     }
 
+    /// A server that failed has no answer set at all, which is not the same as
+    /// answering with zero records. Two failures must not read as agreement.
+    #[test]
+    fn write_comparison_does_not_call_two_failures_identical() {
+        let results = vec![
+            cmp(
+                "8.8.8.8",
+                Err(crate::error::DnsError::Network("timeout".into())),
+            ),
+            cmp(
+                "1.1.1.1",
+                Err(crate::error::DnsError::Network("timeout".into())),
+            ),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_comparison(out, &painter, &results, "e.com", "A"));
+        assert!(!text.contains("identical"), "got:\n{}", text);
+        assert!(text.contains("0 of 2 servers answered"), "got:\n{}", text);
+    }
+
+    /// An unreachable server must not be reported as agreeing with one that
+    /// answered NOERROR with an empty answer section.
+    #[test]
+    fn write_comparison_does_not_equate_an_error_with_an_empty_answer() {
+        let results = vec![
+            cmp(
+                "8.8.8.8",
+                Err(crate::error::DnsError::Network("timeout".into())),
+            ),
+            cmp("1.1.1.1", Ok(fixture_result(vec![]))),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_comparison(out, &painter, &results, "e.com", "A"));
+        assert!(!text.contains("identical"), "got:\n{}", text);
+        assert!(text.contains("1 of 2 servers answered"), "got:\n{}", text);
+    }
+
+    /// Two servers that both genuinely answered with no records *do* agree.
+    #[test]
+    fn write_comparison_treats_two_empty_answer_sections_as_identical() {
+        let results = vec![
+            cmp("8.8.8.8", Ok(fixture_result(vec![]))),
+            cmp("1.1.1.1", Ok(fixture_result(vec![]))),
+        ];
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_comparison(out, &painter, &results, "e.com", "A"));
+        assert!(text.contains("identical"), "got:\n{}", text);
+    }
+
     #[test]
     fn write_comparison_flags_identical_answers() {
         let results = vec![
@@ -1393,6 +1442,17 @@ pub fn write_axfr<W: Write>(out: &mut W, painter: &Painter, records: &[ResourceR
 
 // === Comparison output ===
 
+/// What one server contributed to a comparison.
+///
+/// `answered` is None when the server did not answer at all. That is distinct
+/// from answering with an empty answer section, and keeping the answers and the
+/// timing inside the same Option makes the inconsistent states - a timing with
+/// no answers, or answers with no timing - unrepresentable.
+struct ServerAnswers<'a> {
+    server: &'a str,
+    answered: Option<(Vec<String>, u128)>,
+}
+
 pub fn print_comparison(results: &[ComparisonResult], name: &str, qtype: &str) {
     emit(|out, painter| write_comparison(out, painter, results, name, qtype));
 }
@@ -1413,8 +1473,7 @@ pub fn write_comparison<W: Write>(
         painter.paint(BOLD_CYAN, qtype),
     );
 
-    // Collect answer strings for diff comparison
-    let mut answer_sets: Vec<(&str, Vec<String>, Option<u128>)> = Vec::new();
+    let mut answer_sets: Vec<ServerAnswers> = Vec::new();
 
     for comparison in results {
         let _ = writeln!(out);
@@ -1439,7 +1498,10 @@ pub fn write_comparison<W: Write>(
                     .iter()
                     .map(|rr| format!("{} {} {}", rr.rtype, rr.name, rr.rdata))
                     .collect();
-                answer_sets.push((comparison.server.as_str(), answers, Some(elapsed)));
+                answer_sets.push(ServerAnswers {
+                    server: &comparison.server,
+                    answered: Some((answers, elapsed)),
+                });
             }
             Err(e) => {
                 let _ = writeln!(
@@ -1448,7 +1510,10 @@ pub fn write_comparison<W: Write>(
                     painter.paint(BOLD_YELLOW, &format!("@{}", comparison.server)),
                     painter.paint(RED, &format!("error: {}", e)),
                 );
-                answer_sets.push((comparison.server.as_str(), Vec::new(), None));
+                answer_sets.push(ServerAnswers {
+                    server: &comparison.server,
+                    answered: None,
+                });
             }
         }
     }
@@ -1458,10 +1523,20 @@ pub fn write_comparison<W: Write>(
         let _ = writeln!(out);
         let _ = writeln!(out, " {}", painter.paint(BOLD_WHITE, "SUMMARY"));
 
-        // Check if all answers are identical
-        let first_answers = &answer_sets[0].1;
-        let all_identical = answer_sets.iter().all(|(_, a, _)| a == first_answers);
-        if all_identical {
+        // Only servers that actually answered can be compared against each
+        // other; fewer than two of those and there is nothing to compare.
+        let answered: Vec<&Vec<String>> = answer_sets
+            .iter()
+            .filter_map(|s| s.answered.as_ref().map(|(a, _)| a))
+            .collect();
+        if answered.len() < 2 {
+            let note = format!(
+                "not comparable ({} of {} servers answered)",
+                answered.len(),
+                answer_sets.len()
+            );
+            let _ = writeln!(out, " answers: {}", painter.paint(YELLOW, &note));
+        } else if answered.iter().all(|a| *a == answered[0]) {
             let _ = writeln!(out, " answers: {}", painter.paint(GREEN, "identical"));
         } else {
             let _ = writeln!(out, " answers: {}", painter.paint(YELLOW, "differ"));
@@ -1471,8 +1546,8 @@ pub fn write_comparison<W: Write>(
         // the previous stable sort-then-take-first did.
         let fastest = answer_sets
             .iter()
-            .filter_map(|(s, _, t)| t.map(|t| (*s, t)))
-            .min_by_key(|(_, t)| *t);
+            .filter_map(|s| s.answered.as_ref().map(|(_, ms)| (s.server, *ms)))
+            .min_by_key(|(_, ms)| *ms);
         if let Some((fastest, ms)) = fastest {
             let _ = writeln!(
                 out,
