@@ -1556,7 +1556,9 @@ pub fn write_propagation<W: Write>(
         painter.paint(BOLD_CYAN, qtype),
     );
 
-    let mut answer_groups: std::collections::HashMap<String, Vec<&str>> =
+    // Answer set -> how many resolvers returned it. Only the group count and
+    // the largest group size are reported, so the resolver names are not kept.
+    let mut answer_groups: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut errors = 0usize;
 
@@ -1605,10 +1607,7 @@ pub fn write_propagation<W: Write>(
                     .map(|rr| format!("{} {}", rr.rtype, rr.rdata))
                     .collect::<Vec<_>>()
                     .join("; ");
-                answer_groups
-                    .entry(answer_key)
-                    .or_default()
-                    .push(propagation_result.resolver_name);
+                *answer_groups.entry(answer_key).or_default() += 1;
             }
             Err(e) => {
                 let _ = writeln!(
@@ -1639,7 +1638,7 @@ pub fn write_propagation<W: Write>(
             painter.paint(GREEN, "\u{2014}"),
         );
     } else {
-        let max_group = answer_groups.values().map(|v| v.len()).max().unwrap_or(0);
+        let max_group = answer_groups.values().copied().max().unwrap_or(0);
         let _ = writeln!(
             out,
             " {}/{} resolvers agree {} {}",
