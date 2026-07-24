@@ -129,12 +129,19 @@ fn hex(data: &[u8]) -> String {
     s
 }
 
-fn format_type_bitmaps(types: &[RecordType]) -> String {
-    types
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Write `items` space-separated straight into the formatter.
+///
+/// Display implementations here render into a caller-provided formatter, so
+/// building a Vec<String> and joining it only to hand the result to one more
+/// `write!` allocates twice per field for nothing.
+fn write_space_separated<T: fmt::Display>(f: &mut fmt::Formatter<'_>, items: &[T]) -> fmt::Result {
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            f.write_str(" ")?;
+        }
+        write!(f, "{}", item)?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for RData {
@@ -150,8 +157,13 @@ impl fmt::Display for RData {
                 exchange,
             } => write!(f, "{} {}", preference, exchange),
             RData::TXT(strings) => {
-                let joined: Vec<String> = strings.iter().map(|s| format!("\"{}\"", s)).collect();
-                write!(f, "{}", joined.join(" "))
+                for (i, s) in strings.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "\"{}\"", s)?;
+                }
+                Ok(())
             }
             RData::SOA {
                 mname,
@@ -238,7 +250,8 @@ impl fmt::Display for RData {
                 next_domain,
                 type_bitmaps,
             } => {
-                write!(f, "{} {}", next_domain, format_type_bitmaps(type_bitmaps))
+                write!(f, "{} ", next_domain)?;
+                write_space_separated(f, type_bitmaps)
             }
             RData::NSEC3 {
                 algorithm,
@@ -255,14 +268,14 @@ impl fmt::Display for RData {
                 };
                 write!(
                     f,
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} ",
                     algorithm,
                     flags,
                     iterations,
                     salt_str,
                     base32_encode_hex(next_hashed),
-                    format_type_bitmaps(type_bitmaps)
-                )
+                )?;
+                write_space_separated(f, type_bitmaps)
             }
             RData::NSEC3PARAM {
                 algorithm,
@@ -288,9 +301,8 @@ impl fmt::Display for RData {
                 params,
             } => {
                 write!(f, "{} {}", priority, target)?;
-                let formatted = format_svc_params(params);
-                if !formatted.is_empty() {
-                    write!(f, " {}", formatted)?;
+                for param in params {
+                    write!(f, " {}", format_svc_param(param))?;
                 }
                 Ok(())
             }
@@ -705,14 +717,6 @@ fn parse_svcb_rdata(
         pos += value_len;
     }
     Ok((priority, target, params))
-}
-
-fn format_svc_params(params: &[SvcParam]) -> String {
-    params
-        .iter()
-        .map(format_svc_param)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn format_svc_param(param: &SvcParam) -> String {
