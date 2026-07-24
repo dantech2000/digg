@@ -17,6 +17,8 @@ mod error;
 #[cfg(test)]
 mod fuzz_tests;
 mod idn;
+#[cfg(test)]
+mod microbench;
 mod output;
 mod propagation;
 mod resolver;
