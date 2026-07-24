@@ -1414,7 +1414,7 @@ pub fn write_comparison<W: Write>(
     );
 
     // Collect answer strings for diff comparison
-    let mut answer_sets: Vec<(String, Vec<String>, Option<u128>)> = Vec::new();
+    let mut answer_sets: Vec<(&str, Vec<String>, Option<u128>)> = Vec::new();
 
     for comparison in results {
         let _ = writeln!(out);
@@ -1439,7 +1439,7 @@ pub fn write_comparison<W: Write>(
                     .iter()
                     .map(|rr| format!("{} {} {}", rr.rtype, rr.name, rr.rdata))
                     .collect();
-                answer_sets.push((comparison.server.clone(), answers, Some(elapsed)));
+                answer_sets.push((comparison.server.as_str(), answers, Some(elapsed)));
             }
             Err(e) => {
                 let _ = writeln!(
@@ -1448,7 +1448,7 @@ pub fn write_comparison<W: Write>(
                     painter.paint(BOLD_YELLOW, &format!("@{}", comparison.server)),
                     painter.paint(RED, &format!("error: {}", e)),
                 );
-                answer_sets.push((comparison.server.clone(), Vec::new(), None));
+                answer_sets.push((comparison.server.as_str(), Vec::new(), None));
             }
         }
     }
@@ -1467,13 +1467,13 @@ pub fn write_comparison<W: Write>(
             let _ = writeln!(out, " answers: {}", painter.paint(YELLOW, "differ"));
         }
 
-        // Find fastest
-        let mut times: Vec<(&str, u128)> = answer_sets
+        // Find fastest. min_by_key keeps the first of any tie, matching what
+        // the previous stable sort-then-take-first did.
+        let fastest = answer_sets
             .iter()
-            .filter_map(|(s, _, t)| t.map(|t| (s.as_str(), t)))
-            .collect();
-        times.sort_by_key(|(_, t)| *t);
-        if let Some((fastest, ms)) = times.first() {
+            .filter_map(|(s, _, t)| t.map(|t| (*s, t)))
+            .min_by_key(|(_, t)| *t);
+        if let Some((fastest, ms)) = fastest {
             let _ = writeln!(
                 out,
                 " fastest: {} ({}ms)",
