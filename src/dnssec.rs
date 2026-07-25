@@ -91,8 +91,8 @@ pub fn validate(
             cd,
             Some(&edns),
         )?;
-        let result = transport::send_query_with_retries(server, port, &query, false, timeout, 2)?;
-        transport::verify_id(&result.message.header, id)?;
+        let result = transport::send_query_with_retries(server, port, &query, false, timeout, 2)?
+            .verify_id(id)?;
         Ok(result.message)
     };
     validate_with(answer, qname, qtype, now, &fetch)

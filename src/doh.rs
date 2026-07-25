@@ -1,5 +1,4 @@
 use crate::error::DnsError;
-use crate::protocol::message::DnsMessage;
 use crate::transport::{QueryResult, TransportProtocol};
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -81,16 +80,7 @@ pub fn send_doh_query(url: &str, query: &[u8], timeout: Duration) -> Result<Quer
         .read_to_end(&mut resp_buf)
         .map_err(|e| DnsError::Network(format!("failed to read DoH response: {}", e)))?;
 
-    let elapsed = start.elapsed();
-    let bytes = resp_buf.len();
-    let message = DnsMessage::parse(&resp_buf)?;
-
-    Ok(QueryResult {
-        message,
-        elapsed,
-        bytes,
-        protocol: TransportProtocol::DoH,
-    })
+    QueryResult::from_wire(&resp_buf, start.elapsed(), TransportProtocol::DoH)
 }
 
 #[cfg(test)]

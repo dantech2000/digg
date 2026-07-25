@@ -47,9 +47,7 @@ pub fn perform_trace(
         for server in &current_servers {
             let query_result = (|| -> Result<QueryResult, DnsError> {
                 let (query, query_id) = DnsMessage::build_query(name, qtype, false, Some(&edns))?;
-                let r = transport::send_query(server, 53, &query, false, timeout)?;
-                transport::verify_id(&r.message.header, query_id)?;
-                Ok(r)
+                transport::send_query(server, 53, &query, false, timeout)?.verify_id(query_id)
             })();
 
             match query_result {

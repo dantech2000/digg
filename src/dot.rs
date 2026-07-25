@@ -1,5 +1,4 @@
 use crate::error::DnsError;
-use crate::protocol::message::DnsMessage;
 use crate::transport::{QueryResult, TransportProtocol};
 use rustls::pki_types::ServerName;
 use std::io::{Read, Write};
@@ -59,16 +58,7 @@ pub fn send_dot_query(
     write_framed_query(&mut tls_stream, query)?;
     let resp_buf = read_framed_response(&mut tls_stream)?;
 
-    let elapsed = start.elapsed();
-    let bytes = resp_buf.len();
-    let message = DnsMessage::parse(&resp_buf)?;
-
-    Ok(QueryResult {
-        message,
-        elapsed,
-        bytes,
-        protocol: TransportProtocol::DoT,
-    })
+    QueryResult::from_wire(&resp_buf, start.elapsed(), TransportProtocol::DoT)
 }
 
 /// Write a query with the DNS-over-TCP 2-byte length prefix (RFC 7858 uses
