@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1](https://github.com/dantech2000/digg/compare/v0.5.0...v0.5.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* **output:** stop reporting failed servers as having identical answers ([99f10e1](https://github.com/dantech2000/digg/commit/99f10e1735f8b78cd45d46d3425c3f89062b3e25))
+* **protocol:** clamp a Client Subnet prefix wider than its address family ([5538ba6](https://github.com/dantech2000/digg/commit/5538ba6bc5c719d72bb70204bebfdfc266f7934e))
+* **scripts:** teach the drift checks the new parser match-arm shape ([2644d73](https://github.com/dantech2000/digg/commit/2644d739f6f60f29ca3554cdeb71447a5f5509e8))
+
+
+### Performance Improvements
+
+* **build:** enable fat LTO and single-codegen-unit release builds ([bb1ea95](https://github.com/dantech2000/digg/commit/bb1ea95924aafb9c337d63a547995dae78af0298))
+* **output:** funnel every print_* through one buffered writer ([8410ea9](https://github.com/dantech2000/digg/commit/8410ea998b2906e322fae892f9df61e60245a025))
+* **output:** stop formatting every record twice in the table renderer ([83c856e](https://github.com/dantech2000/digg/commit/83c856e0d1901e6597b5684c6e7b7c3f337b360e))
+* **protocol:** pre-size the base32 buffer for NSEC3 hashes ([10b51bb](https://github.com/dantech2000/digg/commit/10b51bbf0c4b2624f1351ce6feb1ea38e394539b))
+* **protocol:** render rdata into the formatter instead of joining Strings ([c7d046e](https://github.com/dantech2000/digg/commit/c7d046ebf964b9aeddfa4a35f0b21799c813139b))
+
 ## [0.5.0](https://github.com/dantech2000/digg/compare/v0.4.0...v0.5.0) (2026-07-20)
 
 
