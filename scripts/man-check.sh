@@ -4,14 +4,13 @@
 # dash flag from src/cli.rs and looks for the flag name in docs/digg.1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/flags.sh
+source scripts/flags.sh
 
 missing=0
 # Only scan production code — the test module contains deliberately bogus flags.
 cli_src=$(awk '/#\[cfg\(test\)\]/{exit} {print}' src/cli.rs)
-# +flags: literal arms like "+short" and prefix arms like "+timeout=".
-flags=$(grep -oE '"\+[a-z]+=?"' <<<"$cli_src" | tr -d '"+=' | sort -u)
-# Prefix arms: s.starts_with("+subnet=") style.
-flags+=" $(grep -oE 'starts_with\("\+[a-z]+=' <<<"$cli_src" | sed -E 's/.*\+([a-z]+)=/\1/' | sort -u)"
+flags=$(extract_plus_flags "$cli_src")
 for flag in $flags; do
     if ! grep -q "$flag" docs/digg.1; then
         echo "man page missing +$flag" >&2
