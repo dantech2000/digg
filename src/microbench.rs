@@ -236,6 +236,18 @@ fn microbench_format_ttl() {
     });
     println!("\nhelpers:");
     report("format_ttl x10k", stats, 10_000);
+
+    // base32_encode_hex renders the NSEC3 next-hashed owner name, which is a
+    // 20-byte SHA-1 digest in practice - 32 output characters.
+    let digests: Vec<Vec<u8>> = (0..10_000u32)
+        .map(|i| (0..20).map(|b| (i as u8).wrapping_add(b)).collect())
+        .collect();
+    let stats = measure(WARMUP, SAMPLES, || {
+        for d in &digests {
+            black_box(crate::protocol::record::base32_encode_hex(black_box(d)));
+        }
+    });
+    report("base32_encode_hex x10k (20-byte)", stats, 10_000);
 }
 
 // === Wire-parsing benches ===
