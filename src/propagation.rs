@@ -1,4 +1,5 @@
 use crate::error::DnsError;
+use crate::parallel;
 use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::types::RecordType;
@@ -65,40 +66,22 @@ pub fn check_propagation(
     timeout: Duration,
     edns: EdnsOptions,
 ) -> Vec<PropagationResult> {
-    let mut results = Vec::with_capacity(PUBLIC_RESOLVERS.len());
-
-    std::thread::scope(|s| {
-        let handles: Vec<_> = PUBLIC_RESOLVERS
-            .iter()
-            .map(|resolver| {
-                let edns = &edns;
-                s.spawn(move || {
-                    let result = (|| -> Result<QueryResult, DnsError> {
-                        let (query, query_id) =
-                            DnsMessage::build_query(name, qtype, true, Some(edns))?;
-                        transport::send_query(resolver.ip, 53, &query, false, timeout)?
-                            .verify_id(query_id)
-                    })();
-                    PropagationResult {
-                        resolver_name: resolver.name,
-                        resolver_ip: resolver.ip,
-                        result,
-                    }
-                })
-            })
-            .collect();
-
-        for (resolver, h) in PUBLIC_RESOLVERS.iter().zip(handles) {
-            match h.join() {
-                Ok(r) => results.push(r),
-                Err(_) => results.push(PropagationResult {
-                    resolver_name: resolver.name,
-                    resolver_ip: resolver.ip,
-                    result: Err(DnsError::Network("worker thread panicked".into())),
-                }),
-            }
-        }
+    // One thread per resolver; the list is a fixed ten.
+    let answers = parallel::map(PUBLIC_RESOLVERS, usize::MAX, |resolver| {
+        (|| -> Result<QueryResult, DnsError> {
+            let (query, query_id) = DnsMessage::build_query(name, qtype, true, Some(&edns))?;
+            transport::send_query(resolver.ip, 53, &query, false, timeout)?.verify_id(query_id)
+        })()
     });
 
-    results
+    PUBLIC_RESOLVERS
+        .iter()
+        .zip(answers)
+        .map(|(resolver, answer)| PropagationResult {
+            resolver_name: resolver.name,
+            resolver_ip: resolver.ip,
+            result: answer
+                .unwrap_or_else(|| Err(DnsError::Network("worker thread panicked".into()))),
+        })
+        .collect()
 }

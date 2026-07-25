@@ -20,6 +20,7 @@ mod idn;
 #[cfg(test)]
 mod microbench;
 mod output;
+mod parallel;
 mod propagation;
 mod resolver;
 mod trace;

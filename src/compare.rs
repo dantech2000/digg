@@ -1,4 +1,5 @@
 use crate::error::DnsError;
+use crate::parallel;
 use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::types::RecordType;
@@ -24,39 +25,21 @@ pub fn compare_servers(
         ..EdnsOptions::default()
     };
 
-    // Query all servers in parallel using scoped threads
-    let mut results = Vec::with_capacity(servers.len());
-
-    std::thread::scope(|s| {
-        let handles: Vec<_> = servers
-            .iter()
-            .map(|server| {
-                let edns = &edns;
-                s.spawn(move || {
-                    let result = (|| -> Result<QueryResult, DnsError> {
-                        let (query, query_id) =
-                            DnsMessage::build_query(name, qtype, true, Some(edns))?;
-                        transport::send_query(server, port, &query, force_tcp, timeout)?
-                            .verify_id(query_id)
-                    })();
-                    ComparisonResult {
-                        server: server.clone(),
-                        result,
-                    }
-                })
-            })
-            .collect();
-
-        for (server, h) in servers.iter().zip(handles) {
-            match h.join() {
-                Ok(r) => results.push(r),
-                Err(_) => results.push(ComparisonResult {
-                    server: server.clone(),
-                    result: Err(DnsError::Network("worker thread panicked".into())),
-                }),
-            }
-        }
+    // One thread per server; the count comes from @args, so it is small.
+    let answers = parallel::map(servers, usize::MAX, |server| {
+        (|| -> Result<QueryResult, DnsError> {
+            let (query, query_id) = DnsMessage::build_query(name, qtype, true, Some(&edns))?;
+            transport::send_query(server, port, &query, force_tcp, timeout)?.verify_id(query_id)
+        })()
     });
 
-    results
+    servers
+        .iter()
+        .zip(answers)
+        .map(|(server, answer)| ComparisonResult {
+            server: server.clone(),
+            result: answer
+                .unwrap_or_else(|| Err(DnsError::Network("worker thread panicked".into()))),
+        })
+        .collect()
 }
