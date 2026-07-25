@@ -1,5 +1,4 @@
 use crate::error::DnsError;
-use crate::protocol::header::Header;
 use crate::protocol::message::DnsMessage;
 use serde::Serialize;
 use std::fmt;
@@ -40,6 +39,32 @@ pub struct QueryResult {
     pub elapsed: Duration,
     pub bytes: usize,
     pub protocol: TransportProtocol,
+}
+
+impl QueryResult {
+    pub(crate) fn from_wire(
+        wire: &[u8],
+        elapsed: Duration,
+        protocol: TransportProtocol,
+    ) -> Result<Self, DnsError> {
+        Ok(Self {
+            message: DnsMessage::parse(wire)?,
+            elapsed,
+            bytes: wire.len(),
+            protocol,
+        })
+    }
+
+    pub fn verify_id(self, expected_id: u16) -> Result<Self, DnsError> {
+        let response_id = self.message.header.id;
+        if response_id != expected_id {
+            return Err(DnsError::Protocol(format!(
+                "response ID {} does not match query ID {}",
+                response_id, expected_id
+            )));
+        }
+        Ok(self)
+    }
 }
 
 fn format_addr(server: &str, port: u16) -> String {
@@ -149,15 +174,7 @@ fn send_udp(
         }
     })?;
 
-    let elapsed = start.elapsed();
-    let message = DnsMessage::parse(&resp_buf[..size])?;
-
-    Ok(QueryResult {
-        message,
-        elapsed,
-        bytes: size,
-        protocol: TransportProtocol::Udp,
-    })
+    QueryResult::from_wire(&resp_buf[..size], start.elapsed(), TransportProtocol::Udp)
 }
 
 fn send_tcp(
@@ -193,20 +210,12 @@ fn send_tcp(
         .read_exact(&mut resp_buf)
         .map_err(|e| DnsError::Network(format!("failed to read TCP response: {}", e)))?;
 
-    let elapsed = start.elapsed();
-    let message = DnsMessage::parse(&resp_buf)?;
-
-    Ok(QueryResult {
-        message,
-        elapsed,
-        bytes: resp_len,
-        protocol: TransportProtocol::Tcp,
-    })
+    QueryResult::from_wire(&resp_buf, start.elapsed(), TransportProtocol::Tcp)
 }
 
-/// Send a TCP query on an already-connected stream and return the raw response bytes.
-/// Used by AXFR which needs to read multiple messages from one connection.
-pub fn send_tcp_raw(stream: &mut TcpStream, query: &[u8]) -> Result<(), DnsError> {
+/// Write a length-prefixed DNS query to an already-connected TCP stream.
+/// Used by AXFR, which reads multiple response messages from one connection.
+pub fn write_tcp_query(stream: &mut TcpStream, query: &[u8]) -> Result<(), DnsError> {
     let len = (query.len() as u16).to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(query)?;
@@ -214,7 +223,7 @@ pub fn send_tcp_raw(stream: &mut TcpStream, query: &[u8]) -> Result<(), DnsError
 }
 
 /// Read one DNS message from a TCP stream (2-byte length prefix + message).
-pub fn read_tcp_message(stream: &mut TcpStream) -> Result<(DnsMessage, usize), DnsError> {
+pub fn read_tcp_message(stream: &mut TcpStream) -> Result<DnsMessage, DnsError> {
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf)?;
     let resp_len = u16::from_be_bytes(len_buf) as usize;
@@ -222,16 +231,5 @@ pub fn read_tcp_message(stream: &mut TcpStream) -> Result<(DnsMessage, usize), D
     let mut resp_buf = vec![0u8; resp_len];
     stream.read_exact(&mut resp_buf)?;
 
-    let message = DnsMessage::parse(&resp_buf)?;
-    Ok((message, resp_len))
-}
-
-pub fn verify_id(response: &Header, expected_id: u16) -> Result<(), DnsError> {
-    if response.id != expected_id {
-        return Err(DnsError::Protocol(format!(
-            "response ID {} does not match query ID {}",
-            response.id, expected_id
-        )));
-    }
-    Ok(())
+    DnsMessage::parse(&resp_buf)
 }

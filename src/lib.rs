@@ -228,7 +228,7 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
             )?
         };
 
-        transport::verify_id(&result.message.header, query_id)?;
+        let result = result.verify_id(query_id)?;
 
         if opts.json {
             output::print_json(&result);

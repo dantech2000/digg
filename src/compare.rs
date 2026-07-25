@@ -36,9 +36,8 @@ pub fn compare_servers(
                     let result = (|| -> Result<QueryResult, DnsError> {
                         let (query, query_id) =
                             DnsMessage::build_query(name, qtype, true, Some(edns))?;
-                        let r = transport::send_query(server, port, &query, force_tcp, timeout)?;
-                        transport::verify_id(&r.message.header, query_id)?;
-                        Ok(r)
+                        transport::send_query(server, port, &query, force_tcp, timeout)?
+                            .verify_id(query_id)
                     })();
                     ComparisonResult {
                         server: server.clone(),
