@@ -498,16 +498,15 @@ pub fn verify_rrsig(
     dnskeys: &[&ResourceRecord],
     now: u32,
 ) -> Result<u16, String> {
+    // Only the fields this function reasons about; build_signed_data reads
+    // the rest of the RRSIG itself.
     let RData::RRSIG {
-        type_covered,
         algorithm,
-        labels,
-        original_ttl,
         expiration,
         inception,
         key_tag: sig_tag,
-        signer,
         signature,
+        ..
     } = &rrsig.rdata
     else {
         return Err("not an RRSIG record".to_string());
@@ -522,18 +521,7 @@ pub fn verify_rrsig(
         return Err(format!("signature expired at {}", expiration));
     }
 
-    let signed = build_signed_data(
-        *type_covered,
-        *algorithm,
-        *labels,
-        *original_ttl,
-        *expiration,
-        *inception,
-        *sig_tag,
-        signer,
-        rrset,
-    )
-    .map_err(|e| e.to_string())?;
+    let signed = build_signed_data(&rrsig.rdata, rrset).map_err(|e| e.to_string())?;
 
     let key = dnskeys
         .iter()
@@ -550,23 +538,29 @@ pub fn verify_rrsig(
     Ok(*sig_tag)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_signed_data(
-    type_covered: RecordType,
-    algorithm: u8,
-    labels: u8,
-    original_ttl: u32,
-    expiration: u32,
-    inception: u32,
-    key_tag: u16,
-    signer: &str,
-    rrset: &[&ResourceRecord],
-) -> Result<Vec<u8>, DnsError> {
+/// The bytes an RRSIG is computed over: the RRSIG RDATA minus its signature
+/// field, followed by the canonical RRset (RFC 4034 s3.1.8.1).
+fn build_signed_data(rrsig: &RData, rrset: &[&ResourceRecord]) -> Result<Vec<u8>, DnsError> {
+    let RData::RRSIG {
+        type_covered,
+        algorithm,
+        labels,
+        original_ttl,
+        expiration,
+        inception,
+        key_tag,
+        signer,
+        ..
+    } = rrsig
+    else {
+        return Err(DnsError::Protocol("not an RRSIG record".into()));
+    };
+
     // RRSIG RDATA with the signature field removed.
     let mut data = Vec::new();
     data.extend_from_slice(&type_covered.to_u16().to_be_bytes());
-    data.push(algorithm);
-    data.push(labels);
+    data.push(*algorithm);
+    data.push(*labels);
     data.extend_from_slice(&original_ttl.to_be_bytes());
     data.extend_from_slice(&expiration.to_be_bytes());
     data.extend_from_slice(&inception.to_be_bytes());
@@ -583,7 +577,7 @@ fn build_signed_data(
     entries.dedup_by(|a, b| a.0 == b.0);
 
     for (canon, rr) in entries {
-        let owner = wildcard_owner(&rr.name, labels);
+        let owner = wildcard_owner(&rr.name, *labels);
         data.extend(canonical_name(&owner)?);
         data.extend_from_slice(&rr.rtype.to_u16().to_be_bytes());
         data.extend_from_slice(&rr.rclass.to_u16().to_be_bytes());
