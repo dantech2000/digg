@@ -320,7 +320,10 @@ impl fmt::Display for RData {
 
 pub(crate) fn base32_encode_hex(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
-    let mut result = String::new();
+    // Every 5 input bits become one output character, so the result is
+    // ceil(len * 8 / 5) chars. Sizing up front matches hex() and avoids the
+    // regrowth an NSEC3 digest would otherwise cause.
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
     let mut bits: u64 = 0;
     let mut num_bits = 0;
     for &byte in data {
