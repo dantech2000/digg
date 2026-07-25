@@ -1,4 +1,5 @@
 use crate::error::DnsError;
+use crate::parallel;
 use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::types::RecordType;
@@ -63,46 +64,32 @@ pub fn run_batch(
     force_tcp: bool,
     dnssec: bool,
 ) -> Vec<(String, RecordType, Result<QueryResult, DnsError>)> {
-    let max_threads = 8;
-    let mut results = Vec::with_capacity(queries.len());
+    // A batch file can hold thousands of queries, so cap how many are in
+    // flight at once rather than spawning a thread per line.
+    const MAX_THREADS: usize = 8;
 
     let edns = EdnsOptions {
         dnssec_ok: dnssec,
         ..EdnsOptions::default()
     };
 
-    for chunk in queries.chunks(max_threads) {
-        std::thread::scope(|s| {
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|q| {
-                    let edns = &edns;
-                    s.spawn(move || {
-                        let server = q.server.as_deref().unwrap_or(default_server);
-                        let result = (|| -> Result<QueryResult, DnsError> {
-                            let (query, query_id) =
-                                DnsMessage::build_query(&q.name, q.qtype, true, Some(edns))?;
-                            transport::send_query(server, port, &query, force_tcp, timeout)?
-                                .verify_id(query_id)
-                        })();
-                        (q.name.clone(), q.qtype, result)
-                    })
-                })
-                .collect();
+    let answers = parallel::map(queries, MAX_THREADS, |q| {
+        let server = q.server.as_deref().unwrap_or(default_server);
+        (|| -> Result<QueryResult, DnsError> {
+            let (query, query_id) = DnsMessage::build_query(&q.name, q.qtype, true, Some(&edns))?;
+            transport::send_query(server, port, &query, force_tcp, timeout)?.verify_id(query_id)
+        })()
+    });
 
-            for (q, h) in chunk.iter().zip(handles) {
-                match h.join() {
-                    Ok(r) => results.push(r),
-                    Err(_) => results.push((
-                        q.name.clone(),
-                        q.qtype,
-                        Err(DnsError::Network("worker thread panicked".into())),
-                    )),
-                }
-            }
-        });
-    }
-    results
+    queries
+        .iter()
+        .zip(answers)
+        .map(|(q, answer)| {
+            let result =
+                answer.unwrap_or_else(|| Err(DnsError::Network("worker thread panicked".into())));
+            (q.name.clone(), q.qtype, result)
+        })
+        .collect()
 }
 
 #[cfg(test)]
