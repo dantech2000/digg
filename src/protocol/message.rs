@@ -7,7 +7,7 @@ use crate::protocol::types::{RecordClass, RecordType};
 use rand::Rng;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DnsMessage {
     pub header: Header,
     pub questions: Vec<Question>,

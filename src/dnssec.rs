@@ -12,6 +12,8 @@ use crate::protocol::record::{RData, ResourceRecord};
 use crate::protocol::types::{RecordClass, RecordType};
 use crate::transport;
 use aws_lc_rs::{digest, signature};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// IANA root zone trust anchors (DS form, SHA-256).
@@ -158,6 +160,28 @@ pub fn validate_with(
     now: u32,
     fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
 ) -> Result<ValidationReport, DnsError> {
+    // The walk asks for the same records more than once: a zone's DNSKEY is
+    // fetched to check the answer's RRSIG, again when the chain reaches that
+    // zone, and again as the "parent keys" that sign the child's DS. Validating
+    // cloudflare.com issued eight queries for five distinct records, three of
+    // them back-to-back repeats of the query before.
+    //
+    // Memoising per validation removes those without guessing at anything: a
+    // zone's DNSKEY or DS cannot meaningfully change mid-walk, and reusing the
+    // first response is what the chain is verified against anyway. Only
+    // successes are cached - a failed fetch aborts the validation, so it never
+    // gets a second chance to be wrong.
+    let seen: RefCell<HashMap<(String, u16), DnsMessage>> = RefCell::new(HashMap::new());
+    let fetch = &|name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+        let key = (name.to_string(), rtype.to_u16());
+        if let Some(hit) = seen.borrow().get(&key) {
+            return Ok(hit.clone());
+        }
+        let message = fetch(name, rtype)?;
+        seen.borrow_mut().insert(key, message.clone());
+        Ok(message)
+    };
+
     let mut links = Vec::new();
 
     // 1. The answer RRset and its covering RRSIG.
@@ -1809,6 +1833,49 @@ mod tests {
                 })
             });
         assert!(matched, "cloudflare.com DS should match its KSK");
+    }
+
+    /// The chain walk asks for a zone's DNSKEY from several places, so it used
+    /// to issue eight queries for five distinct records - three of them
+    /// immediate repeats. Each duplicate is a network round trip, and +validate
+    /// is round-trip bound, so this pins that they stay gone.
+    #[test]
+    fn validation_never_fetches_the_same_record_twice() {
+        use std::cell::RefCell;
+        let log: RefCell<Vec<(String, RecordType)>> = RefCell::new(Vec::new());
+        let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            log.borrow_mut().push((name.to_string(), rtype));
+            let wire = match (name, rtype) {
+                ("cloudflare.com.", RecordType::DNSKEY) => CF_DNSKEY,
+                ("cloudflare.com.", RecordType::DS) => COM_DS,
+                ("com.", RecordType::DNSKEY) => COM_DNSKEY,
+                ("com.", RecordType::DS) => COM_DS_AT_ROOT,
+                (".", RecordType::DNSKEY) => ROOT_DNSKEY,
+                other => panic!("unexpected fetch: {:?}", other),
+            };
+            DnsMessage::parse(wire)
+        };
+        let answer = DnsMessage::parse(CF_A).unwrap();
+        let report =
+            validate_with(&answer, "cloudflare.com", RecordType::A, FIXED_NOW, &fetch).unwrap();
+        assert_eq!(
+            report.status,
+            ChainStatus::Secure,
+            "chain must still verify"
+        );
+
+        let fetches = log.borrow().clone();
+        let mut unique = fetches.clone();
+        unique.sort_by(|a, b| (a.0.as_str(), a.1.to_u16()).cmp(&(b.0.as_str(), b.1.to_u16())));
+        unique.dedup();
+        assert_eq!(
+            fetches.len(),
+            unique.len(),
+            "duplicate fetches crept back in: {:?}",
+            fetches
+        );
+        // cloudflare.com DNSKEY + DS, com DNSKEY + DS, root DNSKEY.
+        assert_eq!(fetches.len(), 5, "unexpected fetch set: {:?}", fetches);
     }
 
     #[test]
