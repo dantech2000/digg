@@ -80,6 +80,21 @@ pub struct ValidationReport {
     pub status: ChainStatus,
 }
 
+/// The records of one type within a message section.
+fn records_of(section: &[ResourceRecord], rtype: RecordType) -> Vec<&ResourceRecord> {
+    section.iter().filter(|rr| rr.rtype == rtype).collect()
+}
+
+/// The RRSIGs within a section that cover `rtype`.
+fn rrsigs_covering(
+    section: &[ResourceRecord],
+    rtype: RecordType,
+) -> impl Iterator<Item = &ResourceRecord> {
+    section.iter().filter(
+        move |rr| matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == rtype),
+    )
+}
+
 /// Record a failed link and end the walk as Bogus.
 ///
 /// `detail` is the per-zone line; `reason` is the overall chain status, which
@@ -146,18 +161,8 @@ pub fn validate_with(
     let mut links = Vec::new();
 
     // 1. The answer RRset and its covering RRSIG.
-    let rrset: Vec<&ResourceRecord> = answer
-        .answers
-        .iter()
-        .filter(|rr| rr.rtype == qtype)
-        .collect();
-    let rrsigs: Vec<&ResourceRecord> = answer
-        .answers
-        .iter()
-        .filter(
-            |rr| matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == qtype),
-        )
-        .collect();
+    let rrset = records_of(&answer.answers, qtype);
+    let rrsigs: Vec<&ResourceRecord> = rrsigs_covering(&answer.answers, qtype).collect();
 
     // Empty answer of the requested type: this is a negative response
     // (NXDOMAIN or NODATA). Validate the denial-of-existence proof carried
@@ -204,11 +209,7 @@ pub fn validate_with(
 
     // 2. Verify the answer RRset against the signer zone's DNSKEY set.
     let dnskey_msg = fetch(&zone, RecordType::DNSKEY)?;
-    let dnskeys: Vec<&ResourceRecord> = dnskey_msg
-        .answers
-        .iter()
-        .filter(|rr| rr.rtype == RecordType::DNSKEY)
-        .collect();
+    let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
     match verify_rrsig(&rrset, rrsig, &dnskeys, now) {
         Ok(tag) => links.push(LinkReport::ok(
             zone.clone(),
@@ -239,18 +240,9 @@ fn chain_to_root(
 ) -> Result<ValidationReport, DnsError> {
     loop {
         let dnskey_msg = fetch(&zone, RecordType::DNSKEY)?;
-        let dnskeys: Vec<&ResourceRecord> = dnskey_msg
-            .answers
-            .iter()
-            .filter(|rr| rr.rtype == RecordType::DNSKEY)
-            .collect();
-        let dnskey_sigs: Vec<&ResourceRecord> = dnskey_msg
-            .answers
-            .iter()
-            .filter(|rr| {
-                matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == RecordType::DNSKEY)
-            })
-            .collect();
+        let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
+        let dnskey_sigs: Vec<&ResourceRecord> =
+            rrsigs_covering(&dnskey_msg.answers, RecordType::DNSKEY).collect();
 
         // 3a. DNSKEY RRset must be self-consistent (signed by a key in it).
         let self_sig = dnskey_sigs
@@ -300,11 +292,7 @@ fn chain_to_root(
 
         // 3c. Parent DS must match one of this zone's keys.
         let ds_msg = fetch(&zone, RecordType::DS)?;
-        let ds_set: Vec<&ResourceRecord> = ds_msg
-            .answers
-            .iter()
-            .filter(|rr| rr.rtype == RecordType::DS)
-            .collect();
+        let ds_set = records_of(&ds_msg.answers, RecordType::DS);
         if ds_set.is_empty() {
             links.push(LinkReport::ok(
                 zone.clone(),
@@ -352,28 +340,16 @@ fn chain_to_root(
         }
 
         // 3d. The DS RRset itself is signed by the parent zone.
-        let parent = ds_msg
-            .answers
-            .iter()
+        let parent = rrsigs_covering(&ds_msg.answers, RecordType::DS)
             .find_map(|rr| match &rr.rdata {
-                RData::RRSIG {
-                    type_covered,
-                    signer,
-                    ..
-                } if *type_covered == RecordType::DS => Some(signer.clone()),
+                RData::RRSIG { signer, .. } => Some(signer.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| parent_zone(&zone));
-        let ds_sig = ds_msg.answers.iter().find(|rr| {
-            matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == RecordType::DS)
-        });
+        let ds_sig = rrsigs_covering(&ds_msg.answers, RecordType::DS).next();
         if let Some(sig) = ds_sig {
             let parent_keys_msg = fetch(&parent, RecordType::DNSKEY)?;
-            let parent_keys: Vec<&ResourceRecord> = parent_keys_msg
-                .answers
-                .iter()
-                .filter(|rr| rr.rtype == RecordType::DNSKEY)
-                .collect();
+            let parent_keys = records_of(&parent_keys_msg.answers, RecordType::DNSKEY);
             match verify_rrsig(&ds_set, sig, &parent_keys, now) {
                 Ok(tag) => links.push(LinkReport::ok(
                     zone.clone(),
@@ -748,16 +724,8 @@ fn validate_denial(
     now: u32,
     fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
 ) -> Result<DenialOutcome, DnsError> {
-    let nsec_recs: Vec<&ResourceRecord> = answer
-        .authority
-        .iter()
-        .filter(|rr| rr.rtype == RecordType::NSEC)
-        .collect();
-    let nsec3_recs: Vec<&ResourceRecord> = answer
-        .authority
-        .iter()
-        .filter(|rr| rr.rtype == RecordType::NSEC3)
-        .collect();
+    let nsec_recs = records_of(&answer.authority, RecordType::NSEC);
+    let nsec3_recs = records_of(&answer.authority, RecordType::NSEC3);
 
     if nsec_recs.is_empty() && nsec3_recs.is_empty() {
         return Ok(DenialOutcome::Unsigned(format!(
@@ -790,11 +758,7 @@ fn validate_denial(
     // Fetch the signer's DNSKEY and verify every denial RRSIG (NSEC/NSEC3 and
     // the SOA) against it. Group records by owner+type so each RRset verifies.
     let dnskey_msg = fetch(&signer, RecordType::DNSKEY)?;
-    let dnskeys: Vec<&ResourceRecord> = dnskey_msg
-        .answers
-        .iter()
-        .filter(|rr| rr.rtype == RecordType::DNSKEY)
-        .collect();
+    let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
 
     let mut denial_links = Vec::new();
     if let Err(reason) = verify_denial_signatures(&answer.authority, &dnskeys, now) {
