@@ -23,18 +23,14 @@ pub fn load_config_file() -> Vec<String> {
 #[derive(Debug)]
 pub struct Options {
     pub servers: Vec<String>,
-    pub name: String,
-    pub qtype: RecordType,
     pub qclass: RecordClass,
     pub port: u16,
     pub short: bool,
     pub color: ColorMode,
-    pub tcp: Option<bool>,
+    pub tcp: bool,
     pub recurse: bool,
     pub show_authority: bool,
     pub show_additional: bool,
-    pub reverse: Option<String>,
-    // New features
     pub timeout: u64,
     pub trace: bool,
     pub json: bool,
@@ -49,7 +45,6 @@ pub struct Options {
     pub edns: bool,
     pub doh: Option<String>,
     pub dot: bool,
-    pub axfr: bool,
     pub propagation: bool,
     pub watch: Option<u64>,
     pub subnet: Option<(std::net::IpAddr, u8)>,
@@ -66,17 +61,14 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             servers: Vec::new(),
-            name: ".".to_string(),
-            qtype: RecordType::A,
             qclass: RecordClass::IN,
             port: 53,
             short: false,
             color: ColorMode::Auto,
-            tcp: None,
+            tcp: false,
             recurse: true,
             show_authority: true,
             show_additional: true,
-            reverse: None,
             timeout: 5,
             trace: false,
             json: false,
@@ -91,7 +83,6 @@ impl Default for Options {
             edns: true,
             doh: None,
             dot: false,
-            axfr: false,
             propagation: false,
             watch: None,
             subnet: None,
@@ -110,99 +101,76 @@ impl Options {
     pub fn server(&self) -> Option<&str> {
         self.servers.first().map(|s| s.as_str())
     }
+
+    pub fn primary_query(&self) -> (RecordType, &str) {
+        let (qtype, name) = self
+            .queries
+            .first()
+            .expect("parsed options always contain a query");
+        (*qtype, name)
+    }
+
+    pub fn is_axfr(&self) -> bool {
+        self.primary_query().0 == RecordType::AXFR
+    }
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
     let mut opts = Options::default();
     let mut positionals: Vec<String> = Vec::new();
-    let mut i = 0;
+    let mut reverse = None;
+    let mut args = args.iter();
 
-    while i < args.len() {
-        let arg = &args[i];
-
-        if arg == "--help" || arg == "-h" {
-            crate::output::set_color_mode(opts.color);
-            print_usage();
-            std::process::exit(0);
-        }
-
-        if arg == "--version" || arg == "-V" {
-            println!("digg {}", env!("CARGO_PKG_VERSION"));
-            std::process::exit(0);
-        }
-
-        if arg == "-x" {
-            i += 1;
-            if i >= args.len() {
-                return Err(DnsError::Usage("-x requires an address argument".into()));
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                crate::output::set_color_mode(opts.color);
+                print_usage();
+                std::process::exit(0);
             }
-            opts.reverse = Some(args[i].clone());
-            i += 1;
-            continue;
-        }
-
-        if arg == "-p" {
-            i += 1;
-            if i >= args.len() {
-                return Err(DnsError::Usage("-p requires a port argument".into()));
+            "--version" | "-V" => {
+                println!("digg {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
-            opts.port = args[i]
-                .parse()
-                .map_err(|_| DnsError::Usage(format!("invalid port: {}", args[i])))?;
-            i += 1;
-            continue;
-        }
-
-        if arg == "-c" {
-            i += 1;
-            if i >= args.len() {
-                return Err(DnsError::Usage("-c requires a class argument".into()));
+            "-x" => {
+                reverse =
+                    Some(required_value(&mut args, "-x requires an address argument")?.to_string());
             }
-            opts.qclass = RecordClass::parse_name(&args[i]).ok_or_else(|| {
-                DnsError::Usage(format!(
-                    "invalid class: {} (expected IN, CH, HS, ANY, or CLASS<N>)",
-                    args[i]
-                ))
-            })?;
-            i += 1;
-            continue;
-        }
-
-        if arg == "-f" {
-            i += 1;
-            if i >= args.len() {
-                return Err(DnsError::Usage("-f requires a filename argument".into()));
+            "-p" => {
+                let value = required_value(&mut args, "-p requires a port argument")?;
+                opts.port = value
+                    .parse()
+                    .map_err(|_| DnsError::Usage(format!("invalid port: {}", value)))?;
             }
-            opts.batch_file = Some(args[i].clone());
-            i += 1;
-            continue;
+            "-c" => {
+                let value = required_value(&mut args, "-c requires a class argument")?;
+                opts.qclass = RecordClass::parse_name(value).ok_or_else(|| {
+                    DnsError::Usage(format!(
+                        "invalid class: {} (expected IN, CH, HS, ANY, or CLASS<N>)",
+                        value
+                    ))
+                })?;
+            }
+            "-f" => {
+                opts.batch_file =
+                    Some(required_value(&mut args, "-f requires a filename argument")?.to_string());
+            }
+            arg if arg.starts_with('@') => {
+                opts.servers.push(arg[1..].to_string());
+            }
+            arg if arg.starts_with('+') => {
+                parse_plus_option(&mut opts, arg)?;
+            }
+            arg if arg.starts_with('-') => {
+                return Err(DnsError::Usage(format!("unknown option: {}", arg)));
+            }
+            positional => positionals.push(positional.to_string()),
         }
-
-        if let Some(server) = arg.strip_prefix('@') {
-            opts.servers.push(server.to_string());
-            i += 1;
-            continue;
-        }
-
-        if arg.starts_with('+') {
-            parse_plus_option(&mut opts, arg)?;
-            i += 1;
-            continue;
-        }
-
-        if arg.starts_with('-') {
-            return Err(DnsError::Usage(format!("unknown option: {}", arg)));
-        }
-
-        positionals.push(arg.clone());
-        i += 1;
     }
 
     // Handle reverse lookup
-    if let Some(ref addr) = opts.reverse {
-        opts.name = reverse_name(addr)?;
-        opts.qtype = RecordType::PTR;
-        opts.queries.push((opts.qtype, opts.name.clone()));
+    if let Some(addr) = reverse {
+        opts.queries.push((RecordType::PTR, reverse_name(&addr)?));
         return Ok(opts);
     }
 
@@ -210,18 +178,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
 
     // If no queries found, use defaults
     if opts.queries.is_empty() {
-        opts.queries.push((opts.qtype, opts.name.clone()));
-    }
-
-    // Set primary name/qtype from first query for backward compat
-    if let Some((qtype, name)) = opts.queries.first() {
-        opts.qtype = *qtype;
-        opts.name = name.clone();
-    }
-
-    // Detect AXFR
-    if opts.qtype == RecordType::AXFR {
-        opts.axfr = true;
+        opts.queries.push((RecordType::A, ".".to_string()));
     }
 
     // IDN: convert U-labels to A-labels before anything touches the wire.
@@ -230,9 +187,6 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
             if !name.is_ascii() {
                 *name = crate::idn::to_ascii(name)?;
             }
-        }
-        if let Some((_, name)) = opts.queries.first() {
-            opts.name = name.clone();
         }
     }
 
@@ -255,6 +209,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, DnsError> {
     }
 
     Ok(opts)
+}
+
+fn required_value<'a>(
+    args: &mut impl Iterator<Item = &'a String>,
+    missing_message: &str,
+) -> Result<&'a str, DnsError> {
+    args.next()
+        .map(String::as_str)
+        .ok_or_else(|| DnsError::Usage(missing_message.to_string()))
 }
 
 // Support both: "name type" and "type1 name1 type2 name2"
@@ -330,48 +293,55 @@ fn resolve_queries_from_positionals(
 }
 
 fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
-    match arg {
-        "+short" => opts.short = true,
-        "+color" => opts.color = ColorMode::Always,
-        "+nocolor" => opts.color = ColorMode::Never,
-        "+tcp" => opts.tcp = Some(true),
-        "+notcp" => opts.tcp = Some(false),
-        "+recurse" => opts.recurse = true,
-        "+norecurse" => opts.recurse = false,
-        "+authority" => opts.show_authority = true,
-        "+noauthority" => opts.show_authority = false,
-        "+additional" => opts.show_additional = true,
-        "+noadditional" => opts.show_additional = false,
-        "+trace" => opts.trace = true,
-        "+dnssec" => opts.dnssec = true,
-        "+cd" => opts.cd = true,
-        "+nocd" => opts.cd = false,
-        "+validate" => {
+    let option = arg
+        .strip_prefix('+')
+        .expect("parse_plus_option requires a plus-prefixed argument");
+    let (name, value) = match option.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (option, None),
+    };
+
+    match (name, value) {
+        ("short", None) => opts.short = true,
+        ("color", None) => opts.color = ColorMode::Always,
+        ("nocolor", None) => opts.color = ColorMode::Never,
+        ("tcp", None) => opts.tcp = true,
+        ("notcp", None) => opts.tcp = false,
+        ("recurse", None) => opts.recurse = true,
+        ("norecurse", None) => opts.recurse = false,
+        ("authority", None) => opts.show_authority = true,
+        ("noauthority", None) => opts.show_authority = false,
+        ("additional", None) => opts.show_additional = true,
+        ("noadditional", None) => opts.show_additional = false,
+        ("trace", None) => opts.trace = true,
+        ("dnssec", None) => opts.dnssec = true,
+        ("cd", None) => opts.cd = true,
+        ("nocd", None) => opts.cd = false,
+        ("validate", None) => {
             opts.validate = true;
             opts.dnssec = true;
         }
-        "+json" => opts.json = true,
-        "+yaml" => opts.yaml = true,
-        "+tsv" => opts.tsv = true,
-        "+compat" => opts.compat = true,
-        "+dot" => opts.dot = true,
-        "+edns" => opts.edns = true,
-        "+noedns" => opts.edns = false,
-        "+bench" => opts.bench = Some(100),
-        "+propagation" | "+prop" => opts.propagation = true,
-        "+nsid" => opts.nsid = true,
-        "+qr" => opts.qr = true,
-        "+noqr" => opts.qr = false,
-        "+stats" => opts.stats = true,
-        "+nostats" => opts.stats = false,
-        "+idnin" => opts.idn_in = true,
-        "+noidnin" => opts.idn_in = false,
-        "+idnout" => opts.idn_out = true,
-        "+noidnout" => opts.idn_out = false,
-        "+watch" => opts.watch = Some(2),
-        "+doh" => opts.doh = Some(String::new()),
-        s if s.starts_with("+timeout=") => {
-            let timeout_str = &s[9..];
+        ("json", None) => opts.json = true,
+        ("yaml", None) => opts.yaml = true,
+        ("tsv", None) => opts.tsv = true,
+        ("compat", None) => opts.compat = true,
+        ("dot", None) => opts.dot = true,
+        ("edns", None) => opts.edns = true,
+        ("noedns", None) => opts.edns = false,
+        ("bench", None) => opts.bench = Some(100),
+        ("propagation" | "prop", None) => opts.propagation = true,
+        ("nsid", None) => opts.nsid = true,
+        ("qr", None) => opts.qr = true,
+        ("noqr", None) => opts.qr = false,
+        ("stats", None) => opts.stats = true,
+        ("nostats", None) => opts.stats = false,
+        ("idnin", None) => opts.idn_in = true,
+        ("noidnin", None) => opts.idn_in = false,
+        ("idnout", None) => opts.idn_out = true,
+        ("noidnout", None) => opts.idn_out = false,
+        ("watch", None) => opts.watch = Some(2),
+        ("doh", None) => opts.doh = Some(String::new()),
+        ("timeout", Some(timeout_str)) => {
             opts.timeout = timeout_str
                 .parse::<u64>()
                 .map_err(|_| DnsError::Usage(format!("invalid timeout: {}", timeout_str)))?;
@@ -379,8 +349,7 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
                 return Err(DnsError::Usage("timeout must be > 0".into()));
             }
         }
-        s if s.starts_with("+bench=") => {
-            let bench_str = &s[7..];
+        ("bench", Some(bench_str)) => {
             let n = bench_str
                 .parse::<usize>()
                 .map_err(|_| DnsError::Usage(format!("invalid bench count: {}", bench_str)))?;
@@ -389,8 +358,7 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
             }
             opts.bench = Some(n);
         }
-        s if s.starts_with("+watch=") => {
-            let watch_str = &s[7..];
+        ("watch", Some(watch_str)) => {
             let n = watch_str
                 .parse::<u64>()
                 .map_err(|_| DnsError::Usage(format!("invalid watch interval: {}", watch_str)))?;
@@ -399,17 +367,16 @@ fn parse_plus_option(opts: &mut Options, arg: &str) -> Result<(), DnsError> {
             }
             opts.watch = Some(n);
         }
-        s if s.starts_with("+doh=") => {
-            opts.doh = Some(s[5..].to_string());
+        ("doh", Some(spec)) => {
+            opts.doh = Some(spec.to_string());
         }
-        s if s.starts_with("+retry=") => {
-            let retry_str = &s[7..];
+        ("retry", Some(retry_str)) => {
             opts.retry = retry_str
                 .parse::<u32>()
                 .map_err(|_| DnsError::Usage(format!("invalid retry count: {}", retry_str)))?;
         }
-        s if s.starts_with("+subnet=") => {
-            opts.subnet = Some(parse_subnet(&s[8..])?);
+        ("subnet", Some(spec)) => {
+            opts.subnet = Some(parse_subnet(spec)?);
         }
         _ => {
             return Err(DnsError::Usage(format!("unknown option: {}", arg)));
@@ -644,8 +611,7 @@ mod tests {
             opts.queries,
             vec![(RecordType::A, "example.com".to_string())]
         );
-        assert_eq!(opts.name, "example.com");
-        assert_eq!(opts.qtype, RecordType::A);
+        assert_eq!(opts.primary_query(), (RecordType::A, "example.com"));
     }
 
     #[test]
@@ -751,8 +717,8 @@ mod tests {
     #[test]
     fn axfr_type_sets_axfr_mode() {
         let opts = parse(&["AXFR", "example.com"]);
-        assert!(opts.axfr);
-        assert_eq!(opts.qtype, RecordType::AXFR);
+        assert!(opts.is_axfr());
+        assert_eq!(opts.primary_query(), (RecordType::AXFR, "example.com"));
     }
 
     // === Server and flag arguments ===
@@ -787,8 +753,6 @@ mod tests {
     #[test]
     fn reverse_flag_builds_ptr_query() {
         let opts = parse(&["-x", "192.0.2.1"]);
-        assert_eq!(opts.qtype, RecordType::PTR);
-        assert_eq!(opts.name, "1.2.0.192.in-addr.arpa");
         assert_eq!(
             opts.queries,
             vec![(RecordType::PTR, "1.2.0.192.in-addr.arpa".to_string())]
@@ -811,8 +775,8 @@ mod tests {
 
     #[test]
     fn paired_toggles_last_one_wins() {
-        assert_eq!(parse(&["+tcp", "+notcp"]).tcp, Some(false));
-        assert_eq!(parse(&["+notcp", "+tcp"]).tcp, Some(true));
+        assert!(!parse(&["+tcp", "+notcp"]).tcp);
+        assert!(parse(&["+notcp", "+tcp"]).tcp);
         assert!(!parse(&["+recurse", "+norecurse"]).recurse);
         assert!(!parse(&["+authority", "+noauthority"]).show_authority);
         assert!(!parse(&["+additional", "+noadditional"]).show_additional);
@@ -1074,7 +1038,7 @@ mod tests {
             opts.queries,
             vec![(RecordType::A, "xn--mnchen-3ya.de".to_string())]
         );
-        assert_eq!(opts.name, "xn--mnchen-3ya.de");
+        assert_eq!(opts.primary_query(), (RecordType::A, "xn--mnchen-3ya.de"));
     }
 
     #[test]

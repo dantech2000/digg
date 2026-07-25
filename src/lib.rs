@@ -91,14 +91,8 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
             }
         }
         let server = resolve_server()?;
-        let results = batch::run_batch(
-            &queries,
-            &server,
-            opts.port,
-            timeout,
-            opts.tcp.unwrap_or(false),
-            opts.dnssec,
-        );
+        let results =
+            batch::run_batch(&queries, &server, opts.port, timeout, opts.tcp, opts.dnssec);
         for (name, qtype, result) in &results {
             if opts.tsv {
                 // Machine format: answer lines to stdout, failures to stderr.
@@ -114,9 +108,9 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
     }
 
     // AXFR mode
-    if opts.axfr {
+    if opts.is_axfr() {
         let server = resolve_server()?;
-        let (_, name) = &opts.queries[0];
+        let (_, name) = opts.primary_query();
         let records = axfr::perform_axfr(&server, opts.port, name, timeout)?;
         output::print_axfr(&records);
         return Ok(0);
@@ -124,8 +118,8 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
 
     // Trace mode
     if opts.trace {
-        let (qtype, name) = &opts.queries[0];
-        let hops = trace::perform_trace(name, *qtype, timeout)?;
+        let (qtype, name) = opts.primary_query();
+        let hops = trace::perform_trace(name, qtype, timeout)?;
         output::print_trace(&hops);
         return Ok(0);
     }
@@ -133,15 +127,15 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
     // Bench mode
     if let Some(count) = opts.bench {
         let server = resolve_server()?;
-        let (qtype, name) = &opts.queries[0];
+        let (qtype, name) = opts.primary_query();
         let result = bench::run_benchmark(
             &server,
             opts.port,
             name,
-            *qtype,
+            qtype,
             count,
             timeout,
-            opts.tcp.unwrap_or(false),
+            opts.tcp,
             opts.dnssec,
         );
         output::print_bench(&result, &server, name, &qtype.to_string());
@@ -150,14 +144,14 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
 
     // Server comparison mode
     if opts.servers.len() > 1 {
-        let (qtype, name) = &opts.queries[0];
+        let (qtype, name) = opts.primary_query();
         let results = compare::compare_servers(
             &opts.servers,
             name,
-            *qtype,
+            qtype,
             opts.port,
             timeout,
-            opts.tcp.unwrap_or(false),
+            opts.tcp,
             opts.dnssec,
         );
         output::print_comparison(&results, name, &qtype.to_string());
@@ -166,9 +160,9 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
 
     // Propagation mode
     if opts.propagation {
-        let (qtype, name) = &opts.queries[0];
+        let (qtype, name) = opts.primary_query();
         let results =
-            propagation::check_propagation(name, *qtype, timeout, edns.clone().unwrap_or_default());
+            propagation::check_propagation(name, qtype, timeout, edns.clone().unwrap_or_default());
         output::print_propagation(&results, name, &qtype.to_string());
         return Ok(0);
     }
@@ -176,15 +170,15 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
     // Watch mode
     if let Some(interval) = opts.watch {
         let server = resolve_server()?;
-        let (qtype, name) = &opts.queries[0];
+        let (qtype, name) = opts.primary_query();
         return watch::run_watch(
             &server,
             opts.port,
             name,
-            *qtype,
+            qtype,
             interval,
             timeout,
-            opts.tcp.unwrap_or(false),
+            opts.tcp,
             opts.dnssec,
             opts.short,
         );
@@ -222,9 +216,8 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
         } else if let Some(ref url) = doh_url {
             doh::send_doh_query(url, &query, timeout)?
         } else {
-            let force_tcp = opts.tcp.unwrap_or(false);
             transport::send_query_with_retries(
-                &server, opts.port, &query, force_tcp, timeout, opts.retry,
+                &server, opts.port, &query, opts.tcp, timeout, opts.retry,
             )?
         };
 
