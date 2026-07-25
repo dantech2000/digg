@@ -3,6 +3,18 @@ name = "digg"
 version = "0.5.0"
 edition = "2021"
 
+[profile.release]
+# Cross-crate inlining: the hot paths (record decode, rdata Display) call
+# through protocol module boundaries that thin LTO leaves standing.
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Deliberately NOT panic = "abort". parallel::map turns a panicking worker
+# into an error for that item so one bad query cannot take down a batch or a
+# propagation sweep; aborting would kill the process instead, and the release
+# binary would silently lose behaviour the tests cover.
+
 [dependencies]
 rand = "0.8"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
