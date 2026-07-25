@@ -41,6 +41,11 @@ pub fn client_subnet_option(addr: IpAddr, source_prefix: u8) -> EdnsOption {
         IpAddr::V6(v6) => (2, v6.octets().to_vec()),
     };
 
+    // A prefix wider than the address family would slice past the end of
+    // `octets`. Clamping the prefix rather than just the slice also keeps the
+    // emitted SOURCE PREFIX-LENGTH valid for the family, as RFC 7871 requires.
+    // parse_client_subnet already guards the same way on the decoding side.
+    let source_prefix = source_prefix.min((octets.len() * 8) as u8);
     let addr_len = source_prefix.div_ceil(8) as usize;
     let mut address = octets[..addr_len].to_vec();
     // Zero bits beyond the prefix in the final byte (RFC 7871 §6).
@@ -312,6 +317,32 @@ mod tests {
         assert_eq!(nsid.hex, "00ff");
         assert_eq!(nsid.text, None);
         assert_eq!(nsid.to_string(), "00ff");
+    }
+
+    /// client_subnet_option is public API, so a caller outside the CLI can
+    /// reach it with a prefix wider than the family. That used to slice past
+    /// the end of the address and panic.
+    #[test]
+    fn client_subnet_clamps_a_prefix_wider_than_the_family() {
+        // IPv4: 33 bits would be 5 bytes of a 4-byte address.
+        let opt = client_subnet_option("1.2.3.4".parse().unwrap(), 33);
+        assert_eq!(opt.data, vec![0, 1, 32, 0, 1, 2, 3, 4]);
+        let opt = client_subnet_option("1.2.3.4".parse().unwrap(), u8::MAX);
+        assert_eq!(opt.data, vec![0, 1, 32, 0, 1, 2, 3, 4]);
+
+        // IPv6: 129 bits would be 17 bytes of a 16-byte address.
+        let opt = client_subnet_option("2001:db8::1".parse().unwrap(), 200);
+        assert_eq!(opt.data[0..4], [0, 2, 128, 0]);
+        assert_eq!(opt.data.len(), 4 + 16);
+    }
+
+    /// Valid prefixes are untouched by the clamp.
+    #[test]
+    fn client_subnet_leaves_valid_prefixes_alone() {
+        let opt = client_subnet_option("192.0.2.77".parse().unwrap(), 24);
+        assert_eq!(opt.data, vec![0, 1, 24, 0, 192, 0, 2]);
+        let opt = client_subnet_option("1.2.3.4".parse().unwrap(), 32);
+        assert_eq!(opt.data, vec![0, 1, 32, 0, 1, 2, 3, 4]);
     }
 
     #[test]
