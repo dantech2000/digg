@@ -5,6 +5,7 @@
 //! resolver's AD bit. RFC 4034/4035 canonical form, RFC 6840 clarifications.
 
 use crate::error::DnsError;
+use crate::parallel;
 use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::name::encode_name;
@@ -12,8 +13,8 @@ use crate::protocol::record::{RData, ResourceRecord};
 use crate::protocol::types::{RecordClass, RecordType};
 use crate::transport;
 use aws_lc_rs::{digest, signature};
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// IANA root zone trust anchors (DS form, SHA-256).
@@ -158,7 +159,7 @@ pub fn validate_with(
     qname: &str,
     qtype: RecordType,
     now: u32,
-    fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
 ) -> Result<ValidationReport, DnsError> {
     // The walk asks for the same records more than once: a zone's DNSKEY is
     // fetched to check the answer's RRSIG, again when the chain reaches that
@@ -171,14 +172,16 @@ pub fn validate_with(
     // first response is what the chain is verified against anyway. Only
     // successes are cached - a failed fetch aborts the validation, so it never
     // gets a second chance to be wrong.
-    let seen: RefCell<HashMap<(String, u16), DnsMessage>> = RefCell::new(HashMap::new());
+    let seen: Mutex<HashMap<(String, u16), DnsMessage>> = Mutex::new(HashMap::new());
     let fetch = &|name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
         let key = (name.to_string(), rtype.to_u16());
-        if let Some(hit) = seen.borrow().get(&key) {
+        if let Some(hit) = seen.lock().expect("fetch cache poisoned").get(&key) {
             return Ok(hit.clone());
         }
         let message = fetch(name, rtype)?;
-        seen.borrow_mut().insert(key, message.clone());
+        seen.lock()
+            .expect("fetch cache poisoned")
+            .insert(key, message.clone());
         Ok(message)
     };
 
@@ -253,15 +256,53 @@ pub fn validate_with(
     chain_to_root(zone, now, fetch, links)
 }
 
+/// Warm the fetch cache with every record the walk below is about to ask for,
+/// in one parallel round instead of one blocking round trip at a time.
+///
+/// The zones are predictable: the chain runs from `start` up through its
+/// parents to the root, and each non-root zone needs its DNSKEY and its DS.
+/// This only predicts *which* records to ask for - nothing is trusted, and the
+/// walk still fetches, verifies and decides exactly as before. A wrong guess
+/// costs one unused response, because the walk misses the cache and fetches
+/// for real; the chain walk prefers the DS RRSIG's signer over the derived
+/// parent name, so that can happen for unconventional delegations.
+///
+/// The cost is queries for zones the walk may never reach, when a chain ends
+/// early at an unsigned delegation or turns out bogus. That is bounded by the
+/// label count of the name being validated.
+fn prefetch_chain(
+    start: &str,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+) {
+    let mut wanted: Vec<(String, RecordType)> = Vec::new();
+    let mut zone = start.to_string();
+    loop {
+        wanted.push((zone.clone(), RecordType::DNSKEY));
+        if zone == "." {
+            break;
+        }
+        wanted.push((zone.clone(), RecordType::DS));
+        zone = parent_zone(&zone);
+    }
+
+    // Results are discarded: this runs purely to populate the memo in
+    // validate_with, and any error here is re-encountered by the real walk,
+    // which is where it gets reported.
+    parallel::map(&wanted, usize::MAX, |(name, rtype)| {
+        let _ = fetch(name, *rtype);
+    });
+}
+
 /// Walk from `zone` up to the root, verifying each zone's DNSKEY RRset and
 /// matching it against the parent's DS, until a root trust anchor. Shared by
 /// positive-answer and denial-of-existence validation.
 fn chain_to_root(
     mut zone: String,
     now: u32,
-    fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
     mut links: Vec<LinkReport>,
 ) -> Result<ValidationReport, DnsError> {
+    prefetch_chain(&zone, fetch);
     loop {
         let dnskey_msg = fetch(&zone, RecordType::DNSKEY)?;
         let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
@@ -398,7 +439,7 @@ fn chain_to_root(
 /// nearest unsigned delegation above the query name.
 fn classify_unsigned(
     qname: &str,
-    fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
 ) -> ChainStatus {
     let mut zone = qname.trim_end_matches('.').to_string();
     loop {
@@ -740,7 +781,7 @@ fn validate_denial(
     qname: &str,
     qtype: RecordType,
     now: u32,
-    fetch: &dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError>,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
 ) -> Result<DenialOutcome, DnsError> {
     let nsec_recs = records_of(&answer.authority, RecordType::NSEC);
     let nsec3_recs = records_of(&answer.authority, RecordType::NSEC3);
@@ -1841,10 +1882,10 @@ mod tests {
     /// is round-trip bound, so this pins that they stay gone.
     #[test]
     fn validation_never_fetches_the_same_record_twice() {
-        use std::cell::RefCell;
-        let log: RefCell<Vec<(String, RecordType)>> = RefCell::new(Vec::new());
+        use std::sync::Mutex;
+        let log: Mutex<Vec<(String, RecordType)>> = Mutex::new(Vec::new());
         let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
-            log.borrow_mut().push((name.to_string(), rtype));
+            log.lock().unwrap().push((name.to_string(), rtype));
             let wire = match (name, rtype) {
                 ("cloudflare.com.", RecordType::DNSKEY) => CF_DNSKEY,
                 ("cloudflare.com.", RecordType::DS) => COM_DS,
@@ -1864,7 +1905,7 @@ mod tests {
             "chain must still verify"
         );
 
-        let fetches = log.borrow().clone();
+        let fetches = log.lock().unwrap().clone();
         let mut unique = fetches.clone();
         unique.sort_by(|a, b| (a.0.as_str(), a.1.to_u16()).cmp(&(b.0.as_str(), b.1.to_u16())));
         unique.dedup();
