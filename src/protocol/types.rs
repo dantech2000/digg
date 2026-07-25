@@ -1,88 +1,88 @@
 use serde::Serialize;
 use std::fmt;
 
-#[allow(clippy::upper_case_acronyms)] // DNS record type names are standardized uppercase acronyms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum RecordType {
-    A,
-    AAAA,
-    NS,
-    CNAME,
-    PTR,
-    MX,
-    TXT,
-    SOA,
-    SRV,
-    OPT,
-    DS,
-    RRSIG,
-    NSEC,
-    DNSKEY,
-    NSEC3,
-    NSEC3PARAM,
-    CAA,
-    SVCB,
-    HTTPS,
-    AXFR,
-    ANY,
-    Unknown(u16),
+/// Declare the record types from one table of (variant, wire number, mnemonic).
+///
+/// Those three facts used to live in four independent matches - `from_u16`,
+/// `to_u16`, `parse_name` and `Display` - so adding a type meant four edits and
+/// omitting one was silent. That had already happened: OPT was missing from the
+/// mnemonic table while still reachable as TYPE41.
+macro_rules! record_types {
+    ($($variant:ident = $num:literal, $mnemonic:literal;)*) => {
+        #[allow(clippy::upper_case_acronyms)] // DNS record type names are standardized uppercase acronyms.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+        pub enum RecordType {
+            $($variant,)*
+            Unknown(u16),
+        }
+
+        impl RecordType {
+            pub fn from_u16(val: u16) -> Self {
+                match val {
+                    $($num => RecordType::$variant,)*
+                    n => RecordType::Unknown(n),
+                }
+            }
+
+            pub fn to_u16(self) -> u16 {
+                match self {
+                    $(RecordType::$variant => $num,)*
+                    RecordType::Unknown(n) => n,
+                }
+            }
+
+            /// The variant for an already-uppercased mnemonic. TYPE<N> syntax
+            /// is handled by `parse_name`, which owns the input normalisation.
+            fn from_mnemonic(upper: &str) -> Option<Self> {
+                match upper {
+                    $($mnemonic => Some(RecordType::$variant),)*
+                    _ => None,
+                }
+            }
+
+            /// Every named type, so tests can assert over the whole table
+            /// rather than a hand-copied subset that can fall behind it.
+            #[cfg(test)]
+            pub const ALL: &'static [RecordType] = &[$(RecordType::$variant,)*];
+        }
+
+        impl fmt::Display for RecordType {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    $(RecordType::$variant => f.pad($mnemonic),)*
+                    RecordType::Unknown(n) => f.pad(&format!("TYPE{}", n)),
+                }
+            }
+        }
+    };
+}
+
+// Ordered by wire number, matching the IANA registry.
+record_types! {
+    A          =   1, "A";
+    NS         =   2, "NS";
+    CNAME      =   5, "CNAME";
+    SOA        =   6, "SOA";
+    PTR        =  12, "PTR";
+    MX         =  15, "MX";
+    TXT        =  16, "TXT";
+    AAAA       =  28, "AAAA";
+    SRV        =  33, "SRV";
+    OPT        =  41, "OPT";
+    DS         =  43, "DS";
+    RRSIG      =  46, "RRSIG";
+    NSEC       =  47, "NSEC";
+    DNSKEY     =  48, "DNSKEY";
+    NSEC3      =  50, "NSEC3";
+    NSEC3PARAM =  51, "NSEC3PARAM";
+    SVCB       =  64, "SVCB";
+    HTTPS      =  65, "HTTPS";
+    AXFR       = 252, "AXFR";
+    ANY        = 255, "ANY";
+    CAA        = 257, "CAA";
 }
 
 impl RecordType {
-    pub fn from_u16(val: u16) -> Self {
-        match val {
-            1 => RecordType::A,
-            2 => RecordType::NS,
-            5 => RecordType::CNAME,
-            6 => RecordType::SOA,
-            12 => RecordType::PTR,
-            15 => RecordType::MX,
-            16 => RecordType::TXT,
-            28 => RecordType::AAAA,
-            33 => RecordType::SRV,
-            41 => RecordType::OPT,
-            43 => RecordType::DS,
-            46 => RecordType::RRSIG,
-            47 => RecordType::NSEC,
-            48 => RecordType::DNSKEY,
-            50 => RecordType::NSEC3,
-            51 => RecordType::NSEC3PARAM,
-            64 => RecordType::SVCB,
-            65 => RecordType::HTTPS,
-            252 => RecordType::AXFR,
-            255 => RecordType::ANY,
-            257 => RecordType::CAA,
-            n => RecordType::Unknown(n),
-        }
-    }
-
-    pub fn to_u16(self) -> u16 {
-        match self {
-            RecordType::A => 1,
-            RecordType::NS => 2,
-            RecordType::CNAME => 5,
-            RecordType::SOA => 6,
-            RecordType::PTR => 12,
-            RecordType::MX => 15,
-            RecordType::TXT => 16,
-            RecordType::AAAA => 28,
-            RecordType::SRV => 33,
-            RecordType::OPT => 41,
-            RecordType::DS => 43,
-            RecordType::RRSIG => 46,
-            RecordType::NSEC => 47,
-            RecordType::DNSKEY => 48,
-            RecordType::NSEC3 => 50,
-            RecordType::NSEC3PARAM => 51,
-            RecordType::AXFR => 252,
-            RecordType::ANY => 255,
-            RecordType::SVCB => 64,
-            RecordType::HTTPS => 65,
-            RecordType::CAA => 257,
-            RecordType::Unknown(n) => n,
-        }
-    }
-
     pub fn parse_name(s: &str) -> Option<Self> {
         let upper = s.to_uppercase();
         // RFC 3597 TYPE<N> syntax for arbitrary numeric types. Known numbers
@@ -92,58 +92,15 @@ impl RecordType {
                 return num.parse::<u16>().ok().map(RecordType::from_u16);
             }
         }
-        match upper.as_str() {
-            "A" => Some(RecordType::A),
-            "AAAA" => Some(RecordType::AAAA),
-            "NS" => Some(RecordType::NS),
-            "CNAME" => Some(RecordType::CNAME),
-            "PTR" => Some(RecordType::PTR),
-            "MX" => Some(RecordType::MX),
-            "TXT" => Some(RecordType::TXT),
-            "SOA" => Some(RecordType::SOA),
-            "SRV" => Some(RecordType::SRV),
-            "DS" => Some(RecordType::DS),
-            "RRSIG" => Some(RecordType::RRSIG),
-            "NSEC" => Some(RecordType::NSEC),
-            "DNSKEY" => Some(RecordType::DNSKEY),
-            "NSEC3" => Some(RecordType::NSEC3),
-            "NSEC3PARAM" => Some(RecordType::NSEC3PARAM),
-            "CAA" => Some(RecordType::CAA),
-            "SVCB" => Some(RecordType::SVCB),
-            "HTTPS" => Some(RecordType::HTTPS),
-            "AXFR" => Some(RecordType::AXFR),
-            "ANY" => Some(RecordType::ANY),
-            _ => None,
+        // OPT is a pseudo-RR that only ever appears in the additional section,
+        // never as a query mnemonic, so `digg example.com OPT` treats OPT as a
+        // hostname. TYPE41 still resolves to it. This was previously expressed
+        // by leaving OPT out of the mnemonic match; the table has no such gap,
+        // so the exclusion is stated here instead.
+        if upper == "OPT" {
+            return None;
         }
-    }
-}
-
-impl fmt::Display for RecordType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RecordType::A => f.pad("A"),
-            RecordType::AAAA => f.pad("AAAA"),
-            RecordType::NS => f.pad("NS"),
-            RecordType::CNAME => f.pad("CNAME"),
-            RecordType::PTR => f.pad("PTR"),
-            RecordType::MX => f.pad("MX"),
-            RecordType::TXT => f.pad("TXT"),
-            RecordType::SOA => f.pad("SOA"),
-            RecordType::SRV => f.pad("SRV"),
-            RecordType::OPT => f.pad("OPT"),
-            RecordType::DS => f.pad("DS"),
-            RecordType::RRSIG => f.pad("RRSIG"),
-            RecordType::NSEC => f.pad("NSEC"),
-            RecordType::DNSKEY => f.pad("DNSKEY"),
-            RecordType::NSEC3 => f.pad("NSEC3"),
-            RecordType::NSEC3PARAM => f.pad("NSEC3PARAM"),
-            RecordType::CAA => f.pad("CAA"),
-            RecordType::SVCB => f.pad("SVCB"),
-            RecordType::HTTPS => f.pad("HTTPS"),
-            RecordType::AXFR => f.pad("AXFR"),
-            RecordType::ANY => f.pad("ANY"),
-            RecordType::Unknown(n) => f.pad(&format!("TYPE{}", n)),
-        }
+        RecordType::from_mnemonic(&upper)
     }
 }
 
@@ -299,6 +256,36 @@ mod tests {
             RecordType::parse_name("TYPE65535"),
             Some(RecordType::Unknown(65535))
         );
+    }
+
+    /// The whole point of the single table: these hold for every type, not
+    /// just the handful someone remembered to list.
+    #[test]
+    fn every_record_type_round_trips_through_number_and_mnemonic() {
+        for &rtype in RecordType::ALL {
+            assert_eq!(
+                RecordType::from_u16(rtype.to_u16()),
+                rtype,
+                "{} did not survive a u16 round trip",
+                rtype
+            );
+            let mnemonic = rtype.to_string();
+            assert_eq!(
+                RecordType::from_mnemonic(&mnemonic),
+                Some(rtype),
+                "{} did not survive a mnemonic round trip",
+                rtype
+            );
+        }
+    }
+
+    /// OPT is reachable numerically but not as a query mnemonic.
+    #[test]
+    fn opt_is_excluded_from_mnemonic_parsing_but_not_from_type41() {
+        assert_eq!(RecordType::parse_name("OPT"), None);
+        assert_eq!(RecordType::parse_name("opt"), None);
+        assert_eq!(RecordType::parse_name("TYPE41"), Some(RecordType::OPT));
+        assert_eq!(RecordType::OPT.to_string(), "OPT");
     }
 
     #[test]
