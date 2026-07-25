@@ -57,9 +57,45 @@ pub struct LinkReport {
     pub ok: bool,
 }
 
+impl LinkReport {
+    fn ok(zone: impl Into<String>, detail: impl Into<String>) -> Self {
+        LinkReport {
+            zone: zone.into(),
+            detail: detail.into(),
+            ok: true,
+        }
+    }
+
+    fn failed(zone: impl Into<String>, detail: impl Into<String>) -> Self {
+        LinkReport {
+            zone: zone.into(),
+            detail: detail.into(),
+            ok: false,
+        }
+    }
+}
+
 pub struct ValidationReport {
     pub links: Vec<LinkReport>,
     pub status: ChainStatus,
+}
+
+/// Record a failed link and end the walk as Bogus.
+///
+/// `detail` is the per-zone line; `reason` is the overall chain status, which
+/// repeats the zone because it is shown on its own. Pairing the two here means
+/// a Bogus status cannot be returned without the link that explains it.
+fn bogus(
+    mut links: Vec<LinkReport>,
+    zone: impl Into<String>,
+    detail: impl Into<String>,
+    reason: impl Into<String>,
+) -> Result<ValidationReport, DnsError> {
+    links.push(LinkReport::failed(zone, detail));
+    Ok(ValidationReport {
+        links,
+        status: ChainStatus::Bogus(reason.into()),
+    })
 }
 
 /// Validate the answer's chain of trust by issuing our own DNSKEY/DS
@@ -174,21 +210,17 @@ pub fn validate_with(
         .filter(|rr| rr.rtype == RecordType::DNSKEY)
         .collect();
     match verify_rrsig(&rrset, rrsig, &dnskeys, now) {
-        Ok(tag) => links.push(LinkReport {
-            zone: zone.clone(),
-            detail: format!("{} RRSIG verified (key {})", qtype, tag),
-            ok: true,
-        }),
+        Ok(tag) => links.push(LinkReport::ok(
+            zone.clone(),
+            format!("{} RRSIG verified (key {})", qtype, tag),
+        )),
         Err(e) => {
-            links.push(LinkReport {
-                zone: zone.clone(),
-                detail: format!("{} RRSIG failed: {}", qtype, e),
-                ok: false,
-            });
-            return Ok(ValidationReport {
+            return bogus(
                 links,
-                status: ChainStatus::Bogus(format!("{}: answer signature invalid: {}", zone, e)),
-            });
+                zone.clone(),
+                format!("{} RRSIG failed: {}", qtype, e),
+                format!("{}: answer signature invalid: {}", zone, e),
+            );
         }
     }
 
@@ -225,26 +257,18 @@ fn chain_to_root(
             .iter()
             .find_map(|sig| verify_rrsig(&dnskeys, sig, &dnskeys, now).ok());
         match self_sig {
-            Some(tag) => links.push(LinkReport {
-                zone: zone.clone(),
-                detail: format!("DNSKEY RRset verified (KSK {})", tag),
-                ok: true,
-            }),
+            Some(tag) => links.push(LinkReport::ok(
+                zone.clone(),
+                format!("DNSKEY RRset verified (KSK {})", tag),
+            )),
             None => {
                 let detail = if dnskey_sigs.is_empty() {
                     "DNSKEY RRset has no RRSIG".to_string()
                 } else {
                     "DNSKEY RRset signature invalid".to_string()
                 };
-                links.push(LinkReport {
-                    zone: zone.clone(),
-                    detail: detail.clone(),
-                    ok: false,
-                });
-                return Ok(ValidationReport {
-                    links,
-                    status: ChainStatus::Bogus(format!("{}: {}", zone, detail)),
-                });
+                let reason = format!("{}: {}", zone, detail);
+                return bogus(links, zone.clone(), detail, reason);
             }
         }
 
@@ -257,25 +281,21 @@ fn chain_to_root(
                 })
             });
             if matched {
-                links.push(LinkReport {
-                    zone: zone.clone(),
-                    detail: "root KSK matches IANA trust anchor".to_string(),
-                    ok: true,
-                });
+                links.push(LinkReport::ok(
+                    zone.clone(),
+                    "root KSK matches IANA trust anchor".to_string(),
+                ));
                 return Ok(ValidationReport {
                     links,
                     status: ChainStatus::Secure,
                 });
             }
-            links.push(LinkReport {
-                zone: zone.clone(),
-                detail: "root DNSKEY does not match any built-in trust anchor".to_string(),
-                ok: false,
-            });
-            return Ok(ValidationReport {
+            return bogus(
                 links,
-                status: ChainStatus::Bogus("root trust anchor mismatch".to_string()),
-            });
+                zone.clone(),
+                "root DNSKEY does not match any built-in trust anchor",
+                "root trust anchor mismatch",
+            );
         }
 
         // 3c. Parent DS must match one of this zone's keys.
@@ -286,11 +306,10 @@ fn chain_to_root(
             .filter(|rr| rr.rtype == RecordType::DS)
             .collect();
         if ds_set.is_empty() {
-            links.push(LinkReport {
-                zone: zone.clone(),
-                detail: "no DS at parent (unsigned delegation)".to_string(),
-                ok: true,
-            });
+            links.push(LinkReport::ok(
+                zone.clone(),
+                "no DS at parent (unsigned delegation)".to_string(),
+            ));
             return Ok(ValidationReport {
                 links,
                 status: ChainStatus::Insecure(format!("{}: unsigned delegation, chain ends", zone)),
@@ -318,21 +337,17 @@ fn chain_to_root(
             })
         });
         match ds_match {
-            Some(tag) => links.push(LinkReport {
-                zone: zone.clone(),
-                detail: format!("DS\u{2192}DNSKEY digest verified (key {})", tag),
-                ok: true,
-            }),
+            Some(tag) => links.push(LinkReport::ok(
+                zone.clone(),
+                format!("DS\u{2192}DNSKEY digest verified (key {})", tag),
+            )),
             None => {
-                links.push(LinkReport {
-                    zone: zone.clone(),
-                    detail: "no DS digest matches any DNSKEY".to_string(),
-                    ok: false,
-                });
-                return Ok(ValidationReport {
+                return bogus(
                     links,
-                    status: ChainStatus::Bogus(format!("{}: DS/DNSKEY digest mismatch", zone)),
-                });
+                    zone.clone(),
+                    "no DS digest matches any DNSKEY",
+                    format!("{}: DS/DNSKEY digest mismatch", zone),
+                );
             }
         }
 
@@ -360,24 +375,17 @@ fn chain_to_root(
                 .filter(|rr| rr.rtype == RecordType::DNSKEY)
                 .collect();
             match verify_rrsig(&ds_set, sig, &parent_keys, now) {
-                Ok(tag) => links.push(LinkReport {
-                    zone: zone.clone(),
-                    detail: format!("DS RRSIG verified by {} (key {})", parent, tag),
-                    ok: true,
-                }),
+                Ok(tag) => links.push(LinkReport::ok(
+                    zone.clone(),
+                    format!("DS RRSIG verified by {} (key {})", parent, tag),
+                )),
                 Err(e) => {
-                    links.push(LinkReport {
-                        zone: zone.clone(),
-                        detail: format!("DS RRSIG failed: {}", e),
-                        ok: false,
-                    });
-                    return Ok(ValidationReport {
+                    return bogus(
                         links,
-                        status: ChainStatus::Bogus(format!(
-                            "{}: DS signature invalid: {}",
-                            zone, e
-                        )),
-                    });
+                        zone.clone(),
+                        format!("DS RRSIG failed: {}", e),
+                        format!("{}: DS signature invalid: {}", zone, e),
+                    );
                 }
             }
         }
@@ -790,11 +798,10 @@ fn validate_denial(
 
     let mut denial_links = Vec::new();
     if let Err(reason) = verify_denial_signatures(&answer.authority, &dnskeys, now) {
-        denial_links.push(LinkReport {
-            zone: signer.clone(),
-            detail: format!("denial RRSIG failed: {}", reason),
-            ok: false,
-        });
+        denial_links.push(LinkReport::failed(
+            signer.clone(),
+            format!("denial RRSIG failed: {}", reason),
+        ));
         return Ok(DenialOutcome::Bogus {
             denial_links,
             reason: format!("{}: denial signature invalid: {}", signer, reason),
@@ -810,22 +817,17 @@ fn validate_denial(
 
     match proven {
         Ok(detail) => {
-            denial_links.push(LinkReport {
-                zone: signer.clone(),
-                detail,
-                ok: true,
-            });
+            denial_links.push(LinkReport::ok(signer.clone(), detail));
             Ok(DenialOutcome::Proven {
                 signer,
                 denial_links,
             })
         }
         Err(reason) => {
-            denial_links.push(LinkReport {
-                zone: signer.clone(),
-                detail: format!("denial not proven: {}", reason),
-                ok: false,
-            });
+            denial_links.push(LinkReport::failed(
+                signer.clone(),
+                format!("denial not proven: {}", reason),
+            ));
             Ok(DenialOutcome::Bogus {
                 denial_links,
                 reason: format!("{}: {}", signer, reason),
