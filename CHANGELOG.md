@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2](https://github.com/dantech2000/digg/compare/v0.5.1...v0.5.2) (2026-07-26)
+
+
+### Performance Improvements
+
+* **dnssec:** memoise fetches within a validation ([1c0ff1b](https://github.com/dantech2000/digg/commit/1c0ff1b2fd07367f03b7ba04eaaa25b3259751ce))
+* **dnssec:** prefetch the predicted zone chain in parallel ([2276525](https://github.com/dantech2000/digg/commit/2276525723aa3295c079d6af5dc30f91a4666bf4))
+
 ## [0.5.1](https://github.com/dantech2000/digg/compare/v0.5.0...v0.5.1) (2026-07-25)
 
 
