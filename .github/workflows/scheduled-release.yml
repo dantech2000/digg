@@ -1,0 +1,55 @@
+name: Scheduled Release
+
+# Release Please keeps a release PR open, adding to it as releasable commits
+# land on main. This ships whatever has accumulated once a week, so releases
+# batch instead of cutting one per merged PR, and nobody has to remember to
+# press the button.
+#
+# Run it from the Actions tab (workflow_dispatch) to ship early.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the open release PR, if there is one
+        env:
+          # Must be the PAT, not GITHUB_TOKEN. A push made with GITHUB_TOKEN
+          # does not trigger further workflows, so Release Please would never
+          # see its own PR land and would never create the tag — meaning no
+          # release build and no Homebrew update.
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          pr=$(gh pr list --repo "$REPO" --state open --json number,headRefName \
+                 --jq '[.[] | select(.headRefName | startswith("release-please--"))][0].number // empty')
+
+          if [ -z "$pr" ]; then
+            echo "No release PR open — nothing has landed that warrants a release."
+            echo "No release PR open." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          title=$(gh pr view "$pr" --repo "$REPO" --json title --jq .title)
+          echo "Shipping #$pr: $title"
+
+          # --auto merges as soon as the required checks are green, and merges
+          # immediately if they already are. Falling back to a plain merge
+          # covers the case where auto-merge cannot be armed.
+          gh pr merge "$pr" --repo "$REPO" --squash --auto \
+            || gh pr merge "$pr" --repo "$REPO" --squash
+
+          {
+            echo "### Release"
+            echo "Merged #$pr — $title"
+          } >> "$GITHUB_STEP_SUMMARY"
