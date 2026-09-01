@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3](https://github.com/dantech2000/digg/compare/v0.5.2...v0.5.3) (2026-09-01)
+
+
+### Bug Fixes
+
+* harden terminal output against DNS response injection and fix RRSIG timestamp format ([#102](https://github.com/dantech2000/digg/issues/102)) ([6b8b6e8](https://github.com/dantech2000/digg/commit/6b8b6e84d30e1790bc38d8d1d384a1987207c6e7))
+
 ## [0.5.2](https://github.com/dantech2000/digg/compare/v0.5.1...v0.5.2) (2026-07-26)
 
 
