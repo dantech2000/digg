@@ -144,6 +144,35 @@ fn write_space_separated<T: fmt::Display>(f: &mut fmt::Formatter<'_>, items: &[T
     Ok(())
 }
 
+/// Format an RRSIG signature expiration/inception timestamp as the
+/// `YYYYMMDDHHmmSS` UTC string defined by RFC 4034 §3.2 (the same value the
+/// field carries on the wire, rendered in civil time). Uses a
+/// civil-from-days algorithm to avoid a chrono dependency.
+fn format_rrsig_time(epoch: u32) -> String {
+    let days = (u64::from(epoch) / 86400) as i64;
+    let secs = u64::from(epoch) % 86400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 impl fmt::Display for RData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -224,8 +253,8 @@ impl fmt::Display for RData {
                     algorithm,
                     labels,
                     original_ttl,
-                    expiration,
-                    inception,
+                    format_rrsig_time(*expiration),
+                    format_rrsig_time(*inception),
                     key_tag,
                     signer,
                     base64_encode(signature)
@@ -728,7 +757,9 @@ fn format_svc_param(param: &SvcParam) -> String {
             // mandatory: list of u16 key IDs
             let keys: Vec<String> = param
                 .value
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|k| svc_param_key_name(be_u16(k, 0)))
                 .collect();
             format!("mandatory={}", keys.join(","))
@@ -764,7 +795,9 @@ fn format_svc_param(param: &SvcParam) -> String {
             // ipv4hint: concatenated 4-byte IPv4 addrs
             let addrs: Vec<String> = param
                 .value
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|a| Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
                 .collect();
             format!("ipv4hint={}", addrs.join(","))
@@ -777,11 +810,10 @@ fn format_svc_param(param: &SvcParam) -> String {
             // ipv6hint: concatenated 16-byte IPv6 addrs
             let addrs: Vec<String> = param
                 .value
-                .chunks_exact(16)
-                .map(|a| {
-                    let octets: [u8; 16] = a.try_into().expect("chunks_exact(16) yields 16 bytes");
-                    Ipv6Addr::from(octets).to_string()
-                })
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|a| Ipv6Addr::from(*a).to_string())
                 .collect();
             format!("ipv6hint={}", addrs.join(","))
         }
@@ -964,8 +996,17 @@ mod tests {
         };
         assert_eq!(
             rrsig.to_string(),
-            "A 13 2 3600 1700000000 1690000000 12345 example.com. AQIDBA=="
+            "A 13 2 3600 20231114221320 20230722042640 12345 example.com. AQIDBA=="
         );
+    }
+
+    #[test]
+    fn format_rrsig_time_renders_utc_yyyymmddhhmmss() {
+        // RFC 4034 §3.2: timestamps render as 14-digit UTC civil time.
+        assert_eq!(format_rrsig_time(1700000000), "20231114221320");
+        assert_eq!(format_rrsig_time(1690000000), "20230722042640");
+        // Epoch (1970-01-01 00:00:00 UTC).
+        assert_eq!(format_rrsig_time(0), "19700101000000");
     }
 
     #[test]

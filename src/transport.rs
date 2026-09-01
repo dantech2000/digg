@@ -191,7 +191,9 @@ fn send_tcp(
         .set_read_timeout(Some(timeout))
         .map_err(|e| DnsError::Network(format!("failed to set TCP timeout: {}", e)))?;
 
-    let len = (query.len() as u16).to_be_bytes();
+    let len = u16::try_from(query.len())
+        .map_err(|_| DnsError::Network("query too large for TCP framing (>65535 bytes)".into()))?;
+    let len = len.to_be_bytes();
     stream
         .write_all(&len)
         .map_err(|e| DnsError::Network(format!("failed to send TCP length: {}", e)))?;
@@ -216,7 +218,9 @@ fn send_tcp(
 /// Write a length-prefixed DNS query to an already-connected TCP stream.
 /// Used by AXFR, which reads multiple response messages from one connection.
 pub fn write_tcp_query(stream: &mut TcpStream, query: &[u8]) -> Result<(), DnsError> {
-    let len = (query.len() as u16).to_be_bytes();
+    let len = u16::try_from(query.len())
+        .map_err(|_| DnsError::Network("query too large for TCP framing (>65535 bytes)".into()))?;
+    let len = len.to_be_bytes();
     stream.write_all(&len)?;
     stream.write_all(query)?;
     Ok(())

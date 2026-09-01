@@ -65,7 +65,9 @@ pub fn send_dot_query(
 /// the same framing as DNS-over-TCP). Generic over the stream so the framing
 /// is testable without a TLS connection.
 fn write_framed_query<W: Write>(stream: &mut W, query: &[u8]) -> Result<(), DnsError> {
-    let len = (query.len() as u16).to_be_bytes();
+    let len = u16::try_from(query.len())
+        .map_err(|_| DnsError::Network("query too large for DoT framing (>65535 bytes)".into()))?;
+    let len = len.to_be_bytes();
     stream
         .write_all(&len)
         .and_then(|_| stream.write_all(query))
