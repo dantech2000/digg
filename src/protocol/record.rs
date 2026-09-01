@@ -144,6 +144,35 @@ fn write_space_separated<T: fmt::Display>(f: &mut fmt::Formatter<'_>, items: &[T
     Ok(())
 }
 
+/// Format an RRSIG signature expiration/inception timestamp as the
+/// `YYYYMMDDHHmmSS` UTC string defined by RFC 4034 §3.2 (the same value the
+/// field carries on the wire, rendered in civil time). Uses a
+/// civil-from-days algorithm to avoid a chrono dependency.
+fn format_rrsig_time(epoch: u32) -> String {
+    let days = (u64::from(epoch) / 86400) as i64;
+    let secs = u64::from(epoch) % 86400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 impl fmt::Display for RData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -224,8 +253,8 @@ impl fmt::Display for RData {
                     algorithm,
                     labels,
                     original_ttl,
-                    expiration,
-                    inception,
+                    format_rrsig_time(*expiration),
+                    format_rrsig_time(*inception),
                     key_tag,
                     signer,
                     base64_encode(signature)
@@ -964,8 +993,17 @@ mod tests {
         };
         assert_eq!(
             rrsig.to_string(),
-            "A 13 2 3600 1700000000 1690000000 12345 example.com. AQIDBA=="
+            "A 13 2 3600 20231114221320 20230722042640 12345 example.com. AQIDBA=="
         );
+    }
+
+    #[test]
+    fn format_rrsig_time_renders_utc_yyyymmddhhmmss() {
+        // RFC 4034 §3.2: timestamps render as 14-digit UTC civil time.
+        assert_eq!(format_rrsig_time(1700000000), "20231114221320");
+        assert_eq!(format_rrsig_time(1690000000), "20230722042640");
+        // Epoch (1970-01-01 00:00:00 UTC).
+        assert_eq!(format_rrsig_time(0), "19700101000000");
     }
 
     #[test]

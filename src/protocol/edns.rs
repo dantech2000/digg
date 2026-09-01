@@ -109,10 +109,29 @@ pub struct Nsid {
 impl std::fmt::Display for Nsid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.text {
-            Some(text) => write!(f, "{} (\"{}\")", self.hex, text),
+            Some(text) => write!(f, "{} (\"{}\")", self.hex, sanitize_text(text)),
             None => write!(f, "{}", self.hex),
         }
     }
+}
+
+/// Strip terminal control characters from the printable NSID text before it
+/// is rendered into terminal output. The payload is server-controlled opaque
+/// bytes (RFC 5001) and can carry arbitrary ANSI escape sequences.
+fn sanitize_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\x1B' => out.push_str("<ESC>"),
+            '\x00'..='\x08' | '\x0B' | '\x0C' | '\x0E'..='\x1A' | '\x1C'..='\x1F' => {
+                out.push_str(&format!("<{:02X}>", c as u32));
+            }
+            '\x7F' => out.push_str("<DEL>"),
+            '\u{0080}'..='\u{009F}' => out.push_str(&format!("<U+{:04X}>", c as u32)),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn parse_nsid(data: &[u8]) -> Nsid {

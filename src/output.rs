@@ -42,16 +42,17 @@ pub fn set_idn_out(enabled: bool) {
 /// to the human-oriented formats only; JSON/YAML/TSV/compat keep A-labels
 /// so machine output stays ASCII.
 fn display_name(name: &str) -> String {
-    if IDN_OUT.load(Ordering::Relaxed) {
+    let converted = if IDN_OUT.load(Ordering::Relaxed) {
         crate::idn::to_unicode_lossy(name)
     } else {
         name.to_string()
-    }
+    };
+    sanitize_for_terminal(&converted)
 }
 
 fn display_rdata(rdata: &RData) -> String {
     let text = rdata.to_string();
-    if IDN_OUT.load(Ordering::Relaxed) && rdata.is_name() && text.contains("xn--") {
+    let converted = if IDN_OUT.load(Ordering::Relaxed) && rdata.is_name() && text.contains("xn--") {
         // Name-bearing rdata (CNAME/NS/MX/SRV targets): convert name tokens.
         text.split(' ')
             .map(|token| {
@@ -65,7 +66,34 @@ fn display_rdata(rdata: &RData) -> String {
             .join(" ")
     } else {
         text
+    };
+    sanitize_for_terminal(&converted)
+}
+
+/// Strip or replace control characters that could inject ANSI escape sequences
+/// or other terminal control codes into human-readable output. Network-controlled
+/// DNS response content (TXT, CAA, NSID, names) passes through this before any
+/// terminal display. Machine formats (JSON, YAML, TSV) are not sanitized — they
+/// encode raw bytes via their own escaping.
+fn sanitize_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // ESC (0x1B) starts ANSI escape sequences — replace with visible marker
+            '\x1B' => out.push_str("<ESC>"),
+            // C0 control codes except \t, \n, \r which are legitimate whitespace
+            '\x00'..='\x08' | '\x0B' | '\x0C' | '\x0E'..='\x1A' | '\x1C'..='\x1F' => {
+                out.push_str(&format!("<{:02X}>", c as u32));
+            }
+            // DEL (0x7F)
+            '\x7F' => out.push_str("<DEL>"),
+            // C1 control codes (0x80–0x9F) — also ANSI-escape territory
+            '\u{0080}'..='\u{009F}' => out.push_str(&format!("<U+{:04X}>", c as u32)),
+            // ASCII printable, tabs/newlines/CR, and all higher Unicode pass through
+            other => out.push(other),
+        }
     }
+    out
 }
 
 pub fn set_color_mode(mode: ColorMode) {
@@ -214,6 +242,44 @@ mod tests {
         ]);
         let text = render(|out| write_short(out, &result));
         assert_eq!(text, "93.184.216.34\n93.184.216.35\n");
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_and_control_sequences_from_network_content() {
+        // ESC starts an ANSI escape sequence; the sanitizer neutralizes it.
+        assert_eq!(
+            sanitize_for_terminal("\x1b[31mred\x1b[0m"),
+            "<ESC>[31mred<ESC>[0m"
+        );
+        // Other C0 control bytes are replaced with visible hex markers.
+        assert_eq!(sanitize_for_terminal("a\x07b\x7f"), "a<07>b<DEL>");
+        // Legitimate whitespace and normal Unicode pass through untouched.
+        assert_eq!(sanitize_for_terminal("tab\there\n"), "tab\there\n");
+        assert_eq!(sanitize_for_terminal("naïve.example"), "naïve.example");
+        // C1 controls (0x80..0x9F) are escaped as U+ code points.
+        assert_eq!(sanitize_for_terminal("\u{009B}"), "<U+009B>");
+    }
+
+    #[test]
+    fn short_output_cannot_inject_ansi_through_rdata() {
+        // A TXT/CAA-style rdata carrying an ESC byte must not reach the output
+        // as a live escape sequence.
+        let mut result = fixture_result(vec![]);
+        result.message.answers = vec![ResourceRecord {
+            name: "\x1b[31mevil\x1b[0m".to_string(),
+            rtype: RecordType::TXT,
+            rclass: RecordClass::IN,
+            ttl: 60,
+            rdata: RData::TXT(vec!["\x1b]0;injected title \x07".to_string()]),
+            raw_rdata: vec![],
+        }];
+        let text = render(|out| write_short(out, &result));
+        assert!(
+            !text.contains('\x1b'),
+            "raw ESC leaked into output: {:?}",
+            text
+        );
+        assert!(text.contains("<ESC>"));
     }
 
     #[test]
@@ -473,6 +539,27 @@ mod tests {
     fn write_tsv_of_empty_answer_set_is_empty() {
         let result = fixture_result(vec![]);
         assert_eq!(render(|out| write_tsv(out, &result)), "");
+    }
+
+    #[test]
+    fn write_tsv_escapes_escape_and_control_bytes_in_rdata() {
+        let mut result = fixture_result(vec![]);
+        result.message.answers.push(ResourceRecord {
+            name: "example.com.".to_string(),
+            rtype: RecordType::TXT,
+            rclass: RecordClass::IN,
+            ttl: 60,
+            rdata: RData::TXT(vec!["a\x1bb\x00c\x7f".to_string()]),
+            raw_rdata: Vec::new(),
+        });
+        let text = render(|out| write_tsv(out, &result));
+        let rdata_field = text.trim_end().split('\t').nth(4).unwrap().to_string();
+        assert_eq!(rdata_field, "\"a\\eb\\x00c\\x7f\"");
+        // No raw control bytes leak into the output.
+        assert!(!text.contains('\x1b'));
+        assert!(!text.contains('\x00'));
+        // Exactly 5 fields — embedded separators never add columns.
+        assert_eq!(text.trim_end().split('\t').count(), 5);
     }
 
     // === Compat (dig-style) golden tests ===
@@ -886,7 +973,7 @@ pub fn write_query<W: Write>(
         let _ = writeln!(
             out,
             " {}  {}  {}",
-            q.name,
+            sanitize_for_terminal(&q.name),
             q.qclass,
             painter.paint(BOLD_CYAN, &q.qtype.to_string())
         );
@@ -1040,16 +1127,30 @@ pub fn write_validation<W: Write>(
         } else {
             painter.paint(BOLD_RED, "\u{2717}")
         };
-        let _ = writeln!(out, " {} {:<18} {}", mark, link.zone, link.detail);
+        let _ = writeln!(
+            out,
+            " {} {:<18} {}",
+            mark,
+            sanitize_for_terminal(&link.zone),
+            sanitize_for_terminal(&link.detail)
+        );
     }
 
     let _ = writeln!(out);
     let status = match &report.status {
         ChainStatus::Secure => painter.paint(BOLD_GREEN, "SECURE"),
         ChainStatus::Insecure(why) => {
-            format!("{} ({})", painter.paint(BOLD_YELLOW, "INSECURE"), why)
+            format!(
+                "{} ({})",
+                painter.paint(BOLD_YELLOW, "INSECURE"),
+                sanitize_for_terminal(why)
+            )
         }
-        ChainStatus::Bogus(why) => format!("{} ({})", painter.paint(BOLD_RED, "BOGUS"), why),
+        ChainStatus::Bogus(why) => format!(
+            "{} ({})",
+            painter.paint(BOLD_RED, "BOGUS"),
+            sanitize_for_terminal(why)
+        ),
     };
     let _ = writeln!(out, " {} {}", painter.paint(DIM, "STATUS:"), status);
 }
@@ -1070,7 +1171,7 @@ pub fn write_tsv<W: Write>(out: &mut W, result: &QueryResult) {
         let _ = writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}",
-            rr.name,
+            escape_tsv_field(&rr.name),
             rr.ttl,
             rr.rclass,
             rr.rtype,
@@ -1080,7 +1181,11 @@ pub fn write_tsv<W: Write>(out: &mut W, result: &QueryResult) {
 }
 
 fn escape_tsv_field(value: &str) -> String {
-    if !value.contains(['\t', '\n', '\r', '\\']) {
+    let needs_escape = value.contains(['\t', '\n', '\r', '\\']) || value.contains('\x1B')
+        || value.chars().any(|c| {
+            matches!(c, '\x00'..='\x08' | '\x0B' | '\x0C' | '\x0E'..='\x1A' | '\x1C'..='\x1F' | '\x7F')
+        });
+    if !needs_escape {
         return value.to_string();
     }
     let mut escaped = String::with_capacity(value.len() + 4);
@@ -1090,6 +1195,9 @@ fn escape_tsv_field(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
+            '\x1B' => escaped.push_str("\\e"),
+            '\x7F' => escaped.push_str("\\x7f"),
+            c if c.is_ascii_control() => escaped.push_str(&format!("\\x{:02x}", c as u8)),
             other => escaped.push(other),
         }
     }
@@ -1132,7 +1240,7 @@ pub fn write_compat<W: Write>(
         env!("CARGO_PKG_VERSION"),
         msg.questions
             .first()
-            .map(|q| q.name.trim_end_matches('.').to_string())
+            .map(|q| sanitize_for_terminal(q.name.trim_end_matches('.')))
             .unwrap_or_default()
     );
     let _ = writeln!(
@@ -1180,7 +1288,13 @@ pub fn write_compat<W: Write>(
         let _ = writeln!(out);
         let _ = writeln!(out, ";; QUESTION SECTION:");
         for q in &msg.questions {
-            let _ = writeln!(out, ";{}\t\t\t{}\t{}", q.name, q.qclass, q.qtype);
+            let _ = writeln!(
+                out,
+                ";{}\t\t\t{}\t{}",
+                sanitize_for_terminal(&q.name),
+                q.qclass,
+                q.qtype
+            );
         }
     }
 
@@ -1199,7 +1313,11 @@ pub fn write_compat<W: Write>(
             let _ = writeln!(
                 out,
                 "{}\t\t{}\t{}\t{}\t{}",
-                rr.name, rr.ttl, rr.rclass, rr.rtype, rr.rdata
+                sanitize_for_terminal(&rr.name),
+                rr.ttl,
+                rr.rclass,
+                rr.rtype,
+                sanitize_for_terminal(&rr.rdata.to_string())
             );
         }
     }
@@ -1593,7 +1711,7 @@ pub fn write_batch_result<W: Write>(
                 .message
                 .answers
                 .iter()
-                .map(|rr| rr.rdata.to_string())
+                .map(|rr| sanitize_for_terminal(&rr.rdata.to_string()))
                 .collect();
             let _ = writeln!(out, "{}", painter.paint(GREEN, &values.join(", ")));
         }
