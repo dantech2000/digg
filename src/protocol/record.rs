@@ -757,7 +757,9 @@ fn format_svc_param(param: &SvcParam) -> String {
             // mandatory: list of u16 key IDs
             let keys: Vec<String> = param
                 .value
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|k| svc_param_key_name(be_u16(k, 0)))
                 .collect();
             format!("mandatory={}", keys.join(","))
@@ -793,7 +795,9 @@ fn format_svc_param(param: &SvcParam) -> String {
             // ipv4hint: concatenated 4-byte IPv4 addrs
             let addrs: Vec<String> = param
                 .value
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|a| Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
                 .collect();
             format!("ipv4hint={}", addrs.join(","))
@@ -806,11 +810,10 @@ fn format_svc_param(param: &SvcParam) -> String {
             // ipv6hint: concatenated 16-byte IPv6 addrs
             let addrs: Vec<String> = param
                 .value
-                .chunks_exact(16)
-                .map(|a| {
-                    let octets: [u8; 16] = a.try_into().expect("chunks_exact(16) yields 16 bytes");
-                    Ipv6Addr::from(octets).to_string()
-                })
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|a| Ipv6Addr::from(*a).to_string())
                 .collect();
             format!("ipv6hint={}", addrs.join(","))
         }
