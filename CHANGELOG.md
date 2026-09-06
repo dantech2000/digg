@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.4](https://github.com/dantech2000/digg/compare/v0.5.3...v0.5.4) (2026-09-06)
+
+
+### Bug Fixes
+
+* **release:** emit postflight_steps in the Homebrew cask ([#104](https://github.com/dantech2000/digg/issues/104)) ([466badd](https://github.com/dantech2000/digg/commit/466badde4234b06921dc42c357dc64fbace2d47b))
+
 ## [0.5.3](https://github.com/dantech2000/digg/compare/v0.5.2...v0.5.3) (2026-09-01)
 
 
