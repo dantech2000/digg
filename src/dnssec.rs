@@ -229,7 +229,7 @@ pub fn validate_with(
         return Ok(ValidationReport { links, status });
     };
 
-    let RData::RRSIG { signer, .. } = &rrsig.rdata else {
+    let RData::RRSIG { signer, labels, .. } = &rrsig.rdata else {
         unreachable!("filtered on RRSIG above");
     };
     let zone = signer.clone();
@@ -248,6 +248,41 @@ pub fn validate_with(
                 zone.clone(),
                 format!("{} RRSIG failed: {}", qtype, e),
                 format!("{}: answer signature invalid: {}", zone, e),
+            );
+        }
+    }
+
+    // 2b. The signature above also verifies for an RRset synthesized from a
+    // wildcard, because build_signed_data rebuilds the wildcard owner. That
+    // says the wildcard's data is genuine, not that the wildcard applies: the
+    // same records replayed for a name that exists in its own right would
+    // verify too. The answer must carry proof that the name does not exist.
+    match prove_wildcard_expansion(
+        &answer.authority,
+        &rrset[0].name,
+        *labels,
+        &zone,
+        &dnskeys,
+        now,
+    ) {
+        WildcardProof::NotExpanded => {}
+        WildcardProof::Proven(detail) => links.push(LinkReport::ok(zone.clone(), detail)),
+        WildcardProof::OptOut(detail) => {
+            links.push(LinkReport::ok(zone.clone(), detail));
+            return Ok(ValidationReport {
+                links,
+                status: ChainStatus::Insecure(format!(
+                    "{}: wildcard expansion rests on an opt-out NSEC3, which does not rule out an unsigned delegation",
+                    zone
+                )),
+            });
+        }
+        WildcardProof::Unproven(reason) => {
+            return bogus(
+                links,
+                zone.clone(),
+                format!("wildcard expansion not proven: {}", reason),
+                format!("{}: {}", zone, reason),
             );
         }
     }
@@ -940,21 +975,11 @@ fn prove_nsec(nsecs: &[&ResourceRecord], qname: &str, qtype: RecordType) -> Resu
     }
 
     // NXDOMAIN: an NSEC whose range (owner, next_domain] strictly covers qname.
-    use std::cmp::Ordering;
     for rr in nsecs {
         let RData::NSEC { next_domain, .. } = &rr.rdata else {
             continue;
         };
-        let owner_vs_q = canonical_name_cmp(&rr.name, qname);
-        let q_vs_next = canonical_name_cmp(qname, next_domain);
-        let owner_vs_next = canonical_name_cmp(&rr.name, next_domain);
-        let covered = if owner_vs_next == Ordering::Less {
-            owner_vs_q == Ordering::Less && q_vs_next == Ordering::Less
-        } else {
-            // Last NSEC wraps past the apex: covers anything after owner.
-            owner_vs_q == Ordering::Less || q_vs_next == Ordering::Less
-        };
-        if covered {
+        if nsec_covers(rr, qname) {
             return Ok(format!(
                 "NXDOMAIN proven: NSEC {} < {} < {}",
                 rr.name, qname, next_domain
@@ -962,6 +987,22 @@ fn prove_nsec(nsecs: &[&ResourceRecord], qname: &str, qtype: RecordType) -> Resu
         }
     }
     Err("no NSEC covers the query name".to_string())
+}
+
+/// Does this NSEC's range strictly cover `name` (owner < name < next_domain)?
+fn nsec_covers(rr: &ResourceRecord, name: &str) -> bool {
+    let RData::NSEC { next_domain, .. } = &rr.rdata else {
+        return false;
+    };
+    use std::cmp::Ordering;
+    let owner_vs_name = canonical_name_cmp(&rr.name, name);
+    let name_vs_next = canonical_name_cmp(name, next_domain);
+    if canonical_name_cmp(&rr.name, next_domain) == Ordering::Less {
+        owner_vs_name == Ordering::Less && name_vs_next == Ordering::Less
+    } else {
+        // Last NSEC wraps past the apex: covers anything after owner.
+        owner_vs_name == Ordering::Less || name_vs_next == Ordering::Less
+    }
 }
 
 /// The SHA-1 NSEC3 hash of a name (RFC 5155 §5): H = SHA1(name || salt),
@@ -1127,6 +1168,171 @@ fn prove_nsec3(
     } else {
         Err("wildcard existence not denied".to_string())
     }
+}
+
+// === Wildcard expansion (RFC 4035 §5.3.4, RFC 5155 §8.8) ===
+
+enum WildcardProof {
+    /// The RRSIG label count matches the owner: nothing was synthesized.
+    NotExpanded,
+    /// Signed NSEC/NSEC3 records show the owner name does not exist, so the
+    /// wildcard legitimately applied.
+    Proven(String),
+    /// The NSEC3 covering the next-closer name has opt-out set. An unsigned
+    /// delegation could sit in that span, so the answer is not provably the
+    /// wildcard's — and not provably forged either.
+    OptOut(String),
+    /// Synthesized from a wildcard, with no valid proof that it should be.
+    Unproven(String),
+}
+
+/// What an RRSIG's Labels field holds for `name` (RFC 4034 §3.1.3): the root
+/// and a leading "*" label are not counted.
+fn rrsig_label_count(name: &str) -> usize {
+    let labels: Vec<&str> = name
+        .trim_end_matches('.')
+        .split('.')
+        .filter(|l| !l.is_empty())
+        .collect();
+    labels.len() - usize::from(labels.first() == Some(&"*"))
+}
+
+/// How many trailing labels two names share.
+fn common_suffix_labels(a: &str, b: &str) -> usize {
+    let labels = |n: &'_ str| -> Vec<String> {
+        n.trim_end_matches('.')
+            .rsplit('.')
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_ascii_lowercase())
+            .collect()
+    };
+    labels(a)
+        .iter()
+        .zip(labels(b).iter())
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+/// The `rtype` (NSEC or NSEC3) records in `authority` whose RRset carries a
+/// valid RRSIG from `zone`. Anything else is dropped rather than trusted,
+/// because anyone on the path can add an unsigned record to a response.
+///
+/// A denial record whose own RRSIG is wildcard-expanded is dropped as well.
+/// Otherwise the NSEC at "*.zone" could be replayed under any owner name in
+/// the zone, and so made to cover whatever range a forger needs.
+fn verified_denial_records<'a>(
+    authority: &'a [ResourceRecord],
+    rtype: RecordType,
+    zone: &str,
+    dnskeys: &[&ResourceRecord],
+    now: u32,
+) -> Vec<&'a ResourceRecord> {
+    let mut verified = Vec::new();
+    for sig in rrsigs_covering(authority, rtype) {
+        let RData::RRSIG { signer, labels, .. } = &sig.rdata else {
+            continue;
+        };
+        if !names_equal(signer, zone) || rrsig_label_count(&sig.name) != *labels as usize {
+            continue;
+        }
+        let rrset: Vec<&ResourceRecord> = authority
+            .iter()
+            .filter(|rr| rr.rtype == rtype && names_equal(&rr.name, &sig.name))
+            .collect();
+        if !rrset.is_empty() && verify_rrsig(&rrset, sig, dnskeys, now).is_ok() {
+            verified.extend(rrset);
+        }
+    }
+    verified
+}
+
+/// If the RRset at `owner` was synthesized from a wildcard, check the proof
+/// in `authority` that `owner` itself does not exist.
+fn prove_wildcard_expansion(
+    authority: &[ResourceRecord],
+    owner: &str,
+    labels: u8,
+    zone: &str,
+    dnskeys: &[&ResourceRecord],
+    now: u32,
+) -> WildcardProof {
+    if rrsig_label_count(owner) <= labels as usize {
+        return WildcardProof::NotExpanded;
+    }
+    let nsecs = verified_denial_records(authority, RecordType::NSEC, zone, dnskeys, now);
+    let nsec3s = verified_denial_records(authority, RecordType::NSEC3, zone, dnskeys, now);
+    wildcard_proof(&nsecs, &nsec3s, owner, labels as usize)
+}
+
+/// The proof itself, over denial records already known to be validly signed.
+/// `labels` is the RRSIG label count, which is smaller than `owner`'s.
+fn wildcard_proof(
+    nsecs: &[&ResourceRecord],
+    nsec3s: &[&ResourceRecord],
+    owner: &str,
+    labels: usize,
+) -> WildcardProof {
+    // The wildcard's parent is the closest encloser of the owner; the name one
+    // label longer is the next-closer name, which must not exist.
+    let parts: Vec<&str> = owner.trim_end_matches('.').split('.').collect();
+    let encloser = format!("{}.", parts[parts.len() - labels..].join("."));
+    let next_closer = format!("{}.", parts[parts.len() - labels - 1..].join("."));
+    let wildcard = format!("*.{}", encloser.trim_start_matches('.'));
+
+    if !nsec3s.is_empty() {
+        // RFC 5155 §8.8: an NSEC3 must cover the next-closer name.
+        let covering = nsec3s.iter().find(|rr| {
+            let RData::NSEC3 {
+                iterations, salt, ..
+            } = &rr.rdata
+            else {
+                return false;
+            };
+            nsec3_hash(&next_closer, *iterations, salt).is_some_and(|h| nsec3_covers(rr, &h))
+        });
+        return match covering {
+            Some(rr) if matches!(&rr.rdata, RData::NSEC3 { flags, .. } if flags & 0x01 != 0) => {
+                WildcardProof::OptOut(format!(
+                    "wildcard {} expansion: NSEC3 covering next-closer {} is opt-out",
+                    wildcard, next_closer
+                ))
+            }
+            Some(_) => WildcardProof::Proven(format!(
+                "wildcard {} expansion proven: NSEC3 covers next-closer {}",
+                wildcard, next_closer
+            )),
+            None => WildcardProof::Unproven(format!(
+                "wildcard {} answer, but no NSEC3 covers the next-closer name {}",
+                wildcard, next_closer
+            )),
+        };
+    }
+
+    // RFC 4035 §5.3.4: an NSEC must cover the owner name.
+    let Some(rr) = nsecs.iter().find(|rr| nsec_covers(rr, owner)) else {
+        return WildcardProof::Unproven(format!(
+            "wildcard {} answer, but no signed NSEC proves {} does not exist",
+            wildcard, owner
+        ));
+    };
+    let RData::NSEC { next_domain, .. } = &rr.rdata else {
+        unreachable!("nsec_covers matched an NSEC");
+    };
+    // The NSEC's two ends are names that do exist. If either shares more
+    // labels with the owner than the wildcard's parent does, something closer
+    // than the wildcard exists and this wildcard could not have applied.
+    let nearest =
+        common_suffix_labels(owner, &rr.name).max(common_suffix_labels(owner, next_domain));
+    if nearest != labels {
+        return WildcardProof::Unproven(format!(
+            "wildcard {} answer, but NSEC {} \u{2192} {} puts the closest encloser elsewhere",
+            wildcard, rr.name, next_domain
+        ));
+    }
+    WildcardProof::Proven(format!(
+        "wildcard {} expansion proven: NSEC {} < {} < {}",
+        wildcard, rr.name, owner, next_domain
+    ))
 }
 
 #[cfg(test)]
@@ -1581,6 +1787,402 @@ mod tests {
             canonical_name_cmp("EXAMPLE.com", "example.com"),
             Ordering::Equal
         );
+    }
+
+    // === Wildcard expansion (captured live from 1.1.1.1 on 2026-10-12;
+    // FIXED_WILDCARD_NOW is inside each fixture's signature window). ===
+    // WILDCARD_NSEC is nope12345xyz.internet.nl TXT, WILDCARD_NSEC3 is
+    // nope12345xyz.sidnlabs.nl TXT; both zones answer from a "*" wildcard.
+    const FIXED_WILDCARD_NOW: u32 = 1_791_845_347;
+
+    const WILDCARD_NSEC: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x02, 0x00, 0x02, 0x00, 0x01, 0x0C, 0x6E, 0x6F,
+        0x70, 0x65, 0x31, 0x32, 0x33, 0x34, 0x35, 0x78, 0x79, 0x7A, 0x08, 0x69, 0x6E, 0x74, 0x65,
+        0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x10, 0x00, 0x01, 0xC0, 0x0C, 0x00,
+        0x10, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x0C, 0x0B, 0x76, 0x3D, 0x73, 0x70, 0x66,
+        0x31, 0x20, 0x2D, 0x61, 0x6C, 0x6C, 0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0E,
+        0x10, 0x00, 0x5F, 0x00, 0x10, 0x0D, 0x02, 0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDA, 0x5C, 0x9B,
+        0x6A, 0xC7, 0xDA, 0xD8, 0x58, 0xB3, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74,
+        0x02, 0x6E, 0x6C, 0x00, 0x64, 0x1F, 0x8F, 0x69, 0xCA, 0x84, 0x28, 0x2C, 0x67, 0x3E, 0x37,
+        0x4A, 0xB2, 0x1B, 0x92, 0x43, 0x29, 0x88, 0x3E, 0x47, 0x15, 0x62, 0xFF, 0xE9, 0x5E, 0x9B,
+        0xCB, 0x46, 0x78, 0x68, 0x3B, 0x20, 0x05, 0x85, 0x6C, 0xF0, 0xEE, 0x3E, 0x5D, 0x1C, 0x16,
+        0x41, 0x6F, 0xF4, 0x81, 0xEF, 0x76, 0x36, 0xB5, 0xB5, 0x7A, 0x73, 0x38, 0x3D, 0xC5, 0x51,
+        0x3C, 0x74, 0x8C, 0x23, 0x55, 0xA5, 0xE8, 0xE4, 0x04, 0x5F, 0x34, 0x34, 0x33, 0x04, 0x5F,
+        0x74, 0x63, 0x70, 0x02, 0x6E, 0x6C, 0xC0, 0x19, 0x00, 0x2F, 0x00, 0x01, 0x00, 0x00, 0x01,
+        0x2C, 0x00, 0x23, 0x0D, 0x71, 0x6E, 0x61, 0x6D, 0x65, 0x6D, 0x69, 0x6E, 0x2D, 0x74, 0x65,
+        0x73, 0x74, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00,
+        0x00, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00, 0x03, 0xC0, 0xAD, 0x00, 0x2E, 0x00, 0x01, 0x00,
+        0x00, 0x01, 0x2C, 0x00, 0x5F, 0x00, 0x2F, 0x0D, 0x05, 0x00, 0x00, 0x01, 0x2C, 0x6A, 0xDA,
+        0x2E, 0x6A, 0x6A, 0xC7, 0xB4, 0xAA, 0x58, 0xB3, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E,
+        0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00, 0x3B, 0x80, 0x19, 0x1E, 0x52, 0xC5, 0xC5, 0x2E, 0xF0,
+        0xB8, 0x29, 0x14, 0x0D, 0xFF, 0x48, 0xF9, 0x14, 0x2F, 0xC9, 0x76, 0xA3, 0xD5, 0xBB, 0x23,
+        0xE8, 0x04, 0xC6, 0x29, 0xB6, 0x5A, 0x30, 0x25, 0x38, 0xDA, 0xFE, 0x7C, 0x19, 0xD2, 0x25,
+        0x5E, 0xD1, 0xF3, 0xDC, 0xD4, 0x63, 0xF8, 0x2C, 0x72, 0x17, 0x39, 0x86, 0x7E, 0x12, 0x8A,
+        0x33, 0x84, 0xE0, 0x04, 0x25, 0x10, 0xC7, 0xEB, 0x77, 0xF2, 0x00, 0x00, 0x29, 0x04, 0xD0,
+        0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    ];
+
+    const WILDCARD_NSEC_DNSKEY: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x08, 0x69, 0x6E,
+        0x74, 0x65, 0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x30, 0x00, 0x01, 0xC0,
+        0x0C, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 0x07, 0x2B, 0x00, 0x44, 0x01, 0x01, 0x03, 0x0D,
+        0x40, 0x0D, 0xDD, 0x9C, 0xA7, 0xC9, 0xBD, 0x38, 0xEF, 0x9D, 0xCB, 0x37, 0x15, 0xEA, 0xDC,
+        0x31, 0x72, 0x13, 0x34, 0x87, 0x29, 0x4F, 0x04, 0x40, 0xD5, 0xAA, 0xBE, 0x29, 0xA4, 0x05,
+        0xFD, 0x51, 0x1B, 0xBD, 0x63, 0x81, 0x1F, 0xDD, 0x13, 0x67, 0x18, 0x0B, 0xB8, 0x0C, 0x28,
+        0x87, 0xCF, 0xFE, 0xB3, 0x9F, 0xDA, 0xCA, 0x19, 0x09, 0x88, 0x9F, 0x55, 0x4D, 0x8F, 0x41,
+        0x05, 0xC8, 0x86, 0x26, 0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x07, 0x2B, 0x00,
+        0x5F, 0x00, 0x30, 0x0D, 0x02, 0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDA, 0x4C, 0x92, 0x6A, 0xC7,
+        0xD6, 0x06, 0x58, 0xB3, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E,
+        0x6C, 0x00, 0xE0, 0x2C, 0x04, 0x43, 0xC7, 0x33, 0x25, 0xA6, 0x76, 0x5F, 0x47, 0xE4, 0x2D,
+        0xFA, 0x9B, 0xDF, 0x20, 0x14, 0x46, 0xE6, 0x99, 0xBB, 0x92, 0x57, 0x36, 0x5B, 0xD4, 0x1F,
+        0x2C, 0xA7, 0xC3, 0xC3, 0xD4, 0xCD, 0xD4, 0x30, 0x64, 0xA0, 0x7B, 0x37, 0x29, 0x2B, 0x19,
+        0x71, 0x6B, 0xCB, 0x3D, 0x0D, 0xA0, 0x5F, 0xBD, 0x6F, 0xE2, 0x10, 0x5F, 0xC1, 0x2A, 0xB1,
+        0xB3, 0xF8, 0xE7, 0x28, 0x9C, 0x4A, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00,
+    ];
+
+    const WILDCARD_NSEC3: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x03, 0x00, 0x02, 0x00, 0x01, 0x0C, 0x6E, 0x6F,
+        0x70, 0x65, 0x31, 0x32, 0x33, 0x34, 0x35, 0x78, 0x79, 0x7A, 0x08, 0x73, 0x69, 0x64, 0x6E,
+        0x6C, 0x61, 0x62, 0x73, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x10, 0x00, 0x01, 0xC0, 0x0C, 0x00,
+        0x10, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x0C, 0x0B, 0x76, 0x3D, 0x44, 0x4B, 0x49,
+        0x4D, 0x31, 0x3B, 0x20, 0x70, 0x3D, 0xC0, 0x0C, 0x00, 0x10, 0x00, 0x01, 0x00, 0x00, 0x0E,
+        0x10, 0x00, 0x0C, 0x0B, 0x76, 0x3D, 0x73, 0x70, 0x66, 0x31, 0x20, 0x2D, 0x61, 0x6C, 0x6C,
+        0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x5F, 0x00, 0x10, 0x0D,
+        0x02, 0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDE, 0x1A, 0x3E, 0x6A, 0xCB, 0x99, 0xCE, 0x2B, 0xFD,
+        0x08, 0x73, 0x69, 0x64, 0x6E, 0x6C, 0x61, 0x62, 0x73, 0x02, 0x6E, 0x6C, 0x00, 0x48, 0x2C,
+        0x9C, 0x44, 0x3A, 0xD6, 0x51, 0x0D, 0x4C, 0x6D, 0x69, 0x45, 0x06, 0x7D, 0x4C, 0xB8, 0x49,
+        0xE0, 0x7A, 0xFE, 0xFE, 0xE3, 0xB0, 0x97, 0x59, 0xF4, 0x0E, 0x6C, 0xBD, 0x06, 0x40, 0x4B,
+        0x24, 0xBA, 0x26, 0xB5, 0x71, 0x60, 0x6C, 0x04, 0x57, 0xD8, 0x9C, 0x94, 0xA6, 0xC2, 0x01,
+        0x4B, 0x94, 0xFC, 0x9F, 0xDB, 0x85, 0xCD, 0xAB, 0x27, 0xE2, 0x78, 0x5E, 0x10, 0xC6, 0x52,
+        0x05, 0x99, 0x20, 0x64, 0x6F, 0x63, 0x65, 0x36, 0x69, 0x72, 0x33, 0x76, 0x6F, 0x61, 0x75,
+        0x68, 0x32, 0x31, 0x38, 0x35, 0x6B, 0x6F, 0x66, 0x66, 0x6E, 0x74, 0x72, 0x73, 0x71, 0x69,
+        0x6A, 0x31, 0x68, 0x73, 0x39, 0xC0, 0x19, 0x00, 0x32, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C,
+        0x00, 0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x14, 0x6F, 0x02, 0x68, 0x64, 0xBE, 0x4C, 0x51,
+        0x7F, 0x4F, 0x3C, 0x8C, 0x2E, 0xFD, 0xAC, 0x47, 0xA4, 0x4C, 0x3B, 0x4A, 0xB0, 0x00, 0x06,
+        0x00, 0x00, 0x00, 0x08, 0x00, 0x02, 0xC0, 0xC5, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x3C, 0x00, 0x5F, 0x00, 0x32, 0x0D, 0x03, 0x00, 0x00, 0x00, 0x3C, 0x6A, 0xDF, 0x18, 0xDB,
+        0x6A, 0xCC, 0xA3, 0xBC, 0x2B, 0xFD, 0x08, 0x73, 0x69, 0x64, 0x6E, 0x6C, 0x61, 0x62, 0x73,
+        0x02, 0x6E, 0x6C, 0x00, 0xA8, 0xF8, 0xC6, 0xEA, 0x9F, 0x0D, 0x5F, 0x72, 0xF5, 0xCC, 0xF3,
+        0xB7, 0x76, 0x2D, 0x7D, 0x53, 0xE3, 0xEC, 0xFF, 0xEA, 0xB1, 0xC8, 0xB3, 0x29, 0x67, 0x49,
+        0x7B, 0xC4, 0xFE, 0x3D, 0xF9, 0xD2, 0xF9, 0x69, 0x7A, 0xA5, 0x47, 0x6E, 0xE2, 0x21, 0xC3,
+        0x4F, 0x57, 0xDB, 0xDF, 0xF6, 0xEA, 0xBE, 0x51, 0x19, 0x34, 0x33, 0x4D, 0x0E, 0x3B, 0xBE,
+        0x78, 0xE6, 0xB0, 0x0F, 0xF8, 0xEE, 0x97, 0x77, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00,
+        0x80, 0x00, 0x00, 0x00,
+    ];
+
+    const WILDCARD_NSEC3_DNSKEY: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x08, 0x73, 0x69,
+        0x64, 0x6E, 0x6C, 0x61, 0x62, 0x73, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x30, 0x00, 0x01, 0xC0,
+        0x0C, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 0x03, 0xF7, 0x00, 0x44, 0x01, 0x01, 0x03, 0x0D,
+        0x3E, 0xFF, 0xB1, 0x64, 0x33, 0x99, 0x8F, 0xF7, 0x77, 0x98, 0x62, 0xCF, 0xA6, 0x96, 0x39,
+        0x67, 0xF7, 0xC0, 0x4E, 0x60, 0x3B, 0x14, 0xC8, 0xD3, 0x23, 0x18, 0xAA, 0x1D, 0x47, 0x87,
+        0x03, 0x3C, 0xC9, 0x87, 0x82, 0xEA, 0x09, 0x95, 0xF7, 0xE4, 0x14, 0xF8, 0x51, 0xD9, 0xEA,
+        0xB6, 0xEA, 0x5E, 0x6E, 0x41, 0xD3, 0xA1, 0xAB, 0xF3, 0x69, 0x7C, 0x81, 0xE7, 0x38, 0xD5,
+        0xD2, 0xCE, 0xE8, 0xDF, 0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x03, 0xF7, 0x00,
+        0x5F, 0x00, 0x30, 0x0D, 0x02, 0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDE, 0xA0, 0x33, 0x6A, 0xCC,
+        0x25, 0x76, 0x2B, 0xFD, 0x08, 0x73, 0x69, 0x64, 0x6E, 0x6C, 0x61, 0x62, 0x73, 0x02, 0x6E,
+        0x6C, 0x00, 0x1A, 0xCF, 0xE2, 0x43, 0xB6, 0xE3, 0x19, 0x7F, 0xEC, 0xEE, 0xDA, 0x9B, 0x66,
+        0x4E, 0x89, 0xCE, 0xAC, 0x1A, 0x3D, 0xF4, 0xFA, 0xAB, 0x94, 0x46, 0x0A, 0x17, 0x0D, 0x60,
+        0x9B, 0x45, 0xA0, 0x7D, 0x67, 0xD0, 0xE8, 0x15, 0xC1, 0x90, 0x96, 0xB1, 0xA1, 0x55, 0x83,
+        0x17, 0x22, 0x8D, 0xD3, 0xCA, 0xB1, 0x5F, 0xF7, 0xBF, 0x37, 0x05, 0xDE, 0xE4, 0xAE, 0x17,
+        0x1B, 0x2E, 0x8B, 0xB6, 0x06, 0xEF, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00,
+    ];
+
+    /// Run the whole validation against a wildcard fixture. Only the signing
+    /// zone's DNSKEY is served, so a legitimate answer ends at "no DS at
+    /// parent" (Insecure) instead of walking to the root; what matters here is
+    /// whether it gets past the wildcard check or stops there as Bogus.
+    fn validate_wildcard(
+        answer: &DnsMessage,
+        qname: &str,
+        zone: &'static str,
+        dnskey: &'static [u8],
+    ) -> ValidationReport {
+        let fetch = denial_fetch(zone, dnskey);
+        validate_with(answer, qname, RecordType::TXT, FIXED_WILDCARD_NOW, &fetch).unwrap()
+    }
+
+    fn wildcard_link(report: &ValidationReport) -> Option<&LinkReport> {
+        report.links.iter().find(|l| l.detail.contains("wildcard"))
+    }
+
+    #[test]
+    fn nsec_wildcard_expansion_is_proven() {
+        let answer = full_message(WILDCARD_NSEC);
+        let report = validate_wildcard(
+            &answer,
+            "nope12345xyz.internet.nl",
+            "internet.nl.",
+            WILDCARD_NSEC_DNSKEY,
+        );
+        let link = wildcard_link(&report).expect("wildcard link reported");
+        assert!(link.ok, "{}", link.detail);
+        assert!(
+            link.detail
+                .contains("wildcard *.internet.nl. expansion proven: NSEC"),
+            "{}",
+            link.detail
+        );
+        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+    }
+
+    #[test]
+    fn nsec3_wildcard_expansion_is_proven() {
+        let answer = full_message(WILDCARD_NSEC3);
+        let report = validate_wildcard(
+            &answer,
+            "nope12345xyz.sidnlabs.nl",
+            "sidnlabs.nl.",
+            WILDCARD_NSEC3_DNSKEY,
+        );
+        let link = wildcard_link(&report).expect("wildcard link reported");
+        assert!(link.ok, "{}", link.detail);
+        assert!(
+            link.detail.contains(
+                "wildcard *.sidnlabs.nl. expansion proven: NSEC3 covers next-closer nope12345xyz.sidnlabs.nl."
+            ),
+            "{}",
+            link.detail
+        );
+        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+    }
+
+    /// The attack this check exists for: the wildcard's records and signature
+    /// are genuine, so they verify, but nothing shows the name is absent.
+    #[test]
+    fn wildcard_answer_without_its_proof_is_bogus() {
+        for (wire, qname, zone, dnskey) in [
+            (
+                WILDCARD_NSEC,
+                "nope12345xyz.internet.nl",
+                "internet.nl.",
+                WILDCARD_NSEC_DNSKEY,
+            ),
+            (
+                WILDCARD_NSEC3,
+                "nope12345xyz.sidnlabs.nl",
+                "sidnlabs.nl.",
+                WILDCARD_NSEC3_DNSKEY,
+            ),
+        ] {
+            let mut answer = full_message(wire);
+            answer.authority.clear();
+            let report = validate_wildcard(&answer, qname, zone, dnskey);
+            assert!(
+                matches!(&report.status, ChainStatus::Bogus(why) if why.contains("wildcard")),
+                "{}: expected Bogus, got {:?}",
+                zone,
+                report.status
+            );
+            // The signature itself still verifies; only the proof is missing.
+            assert!(report
+                .links
+                .iter()
+                .any(|l| l.ok && l.detail.contains("RRSIG verified")));
+            assert!(wildcard_link(&report).is_some_and(|l| !l.ok));
+        }
+    }
+
+    /// An NSEC or NSEC3 with its RRSIG removed proves nothing: anyone on the
+    /// path could have added it.
+    #[test]
+    fn unsigned_wildcard_proof_is_bogus() {
+        for (wire, qname, zone, dnskey) in [
+            (
+                WILDCARD_NSEC,
+                "nope12345xyz.internet.nl",
+                "internet.nl.",
+                WILDCARD_NSEC_DNSKEY,
+            ),
+            (
+                WILDCARD_NSEC3,
+                "nope12345xyz.sidnlabs.nl",
+                "sidnlabs.nl.",
+                WILDCARD_NSEC3_DNSKEY,
+            ),
+        ] {
+            let mut answer = full_message(wire);
+            answer.authority.retain(|rr| rr.rtype != RecordType::RRSIG);
+            assert!(!answer.authority.is_empty(), "fixture keeps its NSEC/NSEC3");
+            let report = validate_wildcard(&answer, qname, zone, dnskey);
+            assert!(
+                matches!(report.status, ChainStatus::Bogus(_)),
+                "{}: expected Bogus, got {:?}",
+                zone,
+                report.status
+            );
+        }
+    }
+
+    /// Replaying the wildcard answer for a different name must fail even with
+    /// the original proof attached, because that proof covers the other name.
+    #[test]
+    fn wildcard_proof_for_another_name_is_bogus() {
+        // www.internet.nl sorts before the fixture NSEC's owner
+        // (_443._tcp.www.internet.nl), so the NSEC does not cover it.
+        let mut answer = full_message(WILDCARD_NSEC);
+        for rr in &mut answer.answers {
+            rr.name = "www.internet.nl.".to_string();
+        }
+        let report = validate_wildcard(
+            &answer,
+            "www.internet.nl",
+            "internet.nl.",
+            WILDCARD_NSEC_DNSKEY,
+        );
+        assert!(
+            matches!(&report.status, ChainStatus::Bogus(why) if why.contains("no signed NSEC proves")),
+            "{:?}",
+            report.status
+        );
+
+        // For NSEC3 the proof is tied to the hash of the next-closer name.
+        let mut answer = full_message(WILDCARD_NSEC3);
+        for rr in &mut answer.answers {
+            rr.name = "nope12345xyy.sidnlabs.nl.".to_string();
+        }
+        let nsec3s = records_of(&answer.authority, RecordType::NSEC3);
+        let proof = wildcard_proof(&[], &nsec3s, "nope12345xyy.sidnlabs.nl.", 2);
+        // A different name hashes elsewhere; the one captured NSEC3 covers a
+        // sliver of the hash space, so this lands outside it.
+        assert!(matches!(proof, WildcardProof::Unproven(_)));
+    }
+
+    fn nsec(owner: &str, next: &str) -> ResourceRecord {
+        ResourceRecord {
+            name: owner.to_string(),
+            rtype: RecordType::NSEC,
+            rclass: RecordClass::IN,
+            ttl: 300,
+            rdata: RData::NSEC {
+                next_domain: next.to_string(),
+                type_bitmaps: vec![RecordType::A],
+            },
+            raw_rdata: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nsec_wildcard_proof_requires_the_wildcards_parent_as_closest_encloser() {
+        // a.example.com exists, so *.example.com cannot answer for x.a.example.com
+        // even though this NSEC does cover that name.
+        let closer = nsec("a.example.com.", "b.example.com.");
+        assert!(nsec_covers(&closer, "x.a.example.com."));
+        assert!(matches!(
+            wildcard_proof(&[&closer], &[], "x.a.example.com.", 2),
+            WildcardProof::Unproven(why) if why.contains("closest encloser")
+        ));
+
+        // Same shape, but nothing closer than example.com exists.
+        let apex = nsec("*.example.com.", "b.example.com.");
+        assert!(matches!(
+            wildcard_proof(&[&apex], &[], "a.example.com.", 2),
+            WildcardProof::Proven(_)
+        ));
+    }
+
+    #[test]
+    fn opt_out_nsec3_makes_a_wildcard_answer_insecure() {
+        // Reuse the real covering NSEC3 and set its opt-out flag; this skips
+        // signature checking by going straight to the proof.
+        let mut answer = full_message(WILDCARD_NSEC3);
+        for rr in &mut answer.authority {
+            if let RData::NSEC3 { flags, .. } = &mut rr.rdata {
+                *flags |= 0x01;
+            }
+        }
+        let nsec3s = records_of(&answer.authority, RecordType::NSEC3);
+        assert!(matches!(
+            wildcard_proof(&[], &nsec3s, "nope12345xyz.sidnlabs.nl.", 2),
+            WildcardProof::OptOut(_)
+        ));
+    }
+
+    #[test]
+    fn literal_wildcard_owner_is_not_an_expansion() {
+        // Querying "*.example.com" itself: three labels on the wire, but the
+        // RRSIG Labels field never counts the "*".
+        assert_eq!(rrsig_label_count("*.example.com."), 2);
+        assert_eq!(rrsig_label_count("www.example.com."), 3);
+        assert_eq!(rrsig_label_count("."), 0);
+        assert!(matches!(
+            prove_wildcard_expansion(&[], "*.example.com.", 2, "example.com.", &[], 0),
+            WildcardProof::NotExpanded
+        ));
+        assert!(matches!(
+            prove_wildcard_expansion(&[], "www.example.com.", 3, "example.com.", &[], 0),
+            WildcardProof::NotExpanded
+        ));
+    }
+
+    // The NODATA answer for "*.internet.nl" HINFO, kept for the NSEC that the
+    // wildcard name itself owns (RRSIG Labels = 2, one fewer than the owner).
+    const WILDCARD_OWNER_NSEC: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x01, 0x2A, 0x08,
+        0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x0D, 0x00,
+        0x01, 0xC0, 0x0E, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x35, 0x03, 0x6E,
+        0x73, 0x31, 0x08, 0x73, 0x69, 0x64, 0x6E, 0x6C, 0x61, 0x62, 0x73, 0xC0, 0x17, 0x0A, 0x68,
+        0x6F, 0x73, 0x74, 0x6D, 0x61, 0x73, 0x74, 0x65, 0x72, 0x04, 0x73, 0x69, 0x64, 0x6E, 0xC0,
+        0x17, 0x00, 0x00, 0x28, 0x0C, 0x00, 0x00, 0x38, 0x40, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x09,
+        0x3A, 0x80, 0x00, 0x00, 0x01, 0x2C, 0xC0, 0x0E, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x01,
+        0x2C, 0x00, 0x5F, 0x00, 0x06, 0x0D, 0x02, 0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDF, 0xD8, 0x06,
+        0x6A, 0xCD, 0x54, 0xF6, 0x58, 0xB3, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74,
+        0x02, 0x6E, 0x6C, 0x00, 0xE3, 0x10, 0x18, 0xEE, 0x93, 0x89, 0x14, 0xC0, 0xBC, 0xEA, 0x81,
+        0x60, 0x59, 0x56, 0xDA, 0x63, 0x8C, 0xE8, 0xBF, 0x92, 0x7A, 0x2B, 0xC5, 0xC8, 0x66, 0x77,
+        0x76, 0x43, 0x32, 0x63, 0xCA, 0xF1, 0x16, 0x27, 0x30, 0x46, 0x84, 0x38, 0x43, 0x9E, 0x3F,
+        0x6B, 0x59, 0x4C, 0x41, 0xE0, 0x10, 0x74, 0x23, 0x38, 0xE7, 0xBF, 0x40, 0x9A, 0x5D, 0xAC,
+        0x36, 0xA0, 0x29, 0xC8, 0xE5, 0x1D, 0x52, 0xE0, 0xC0, 0x0C, 0x00, 0x2F, 0x00, 0x01, 0x00,
+        0x00, 0x01, 0x2C, 0x00, 0x21, 0x05, 0x62, 0x61, 0x74, 0x63, 0x68, 0x05, 0x5F, 0x64, 0x61,
+        0x6E, 0x65, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E, 0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00,
+        0x00, 0x06, 0x00, 0x00, 0x80, 0x00, 0x00, 0x03, 0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00,
+        0x00, 0x01, 0x2C, 0x00, 0x5F, 0x00, 0x2F, 0x0D, 0x02, 0x00, 0x00, 0x01, 0x2C, 0x6A, 0xDA,
+        0x5C, 0x9B, 0x6A, 0xC7, 0xDA, 0xD8, 0x58, 0xB3, 0x08, 0x69, 0x6E, 0x74, 0x65, 0x72, 0x6E,
+        0x65, 0x74, 0x02, 0x6E, 0x6C, 0x00, 0xF6, 0xD2, 0xDB, 0x8F, 0x3D, 0x50, 0x25, 0x9D, 0x14,
+        0x2C, 0x96, 0x38, 0xE7, 0x38, 0x8D, 0x33, 0x96, 0x12, 0x4F, 0x79, 0x3F, 0xA0, 0xCA, 0xDD,
+        0xB2, 0x10, 0xE5, 0x52, 0x15, 0x6A, 0x18, 0x8B, 0xE1, 0x65, 0x87, 0x20, 0x4B, 0xB7, 0x19,
+        0x7F, 0xBB, 0x27, 0x9E, 0x87, 0x17, 0x23, 0xC6, 0x6A, 0x77, 0x91, 0x94, 0x13, 0x3C, 0x42,
+        0x21, 0x8E, 0xA8, 0xB1, 0x6A, 0xAC, 0x63, 0x7F, 0x35, 0x6E, 0x00, 0x00, 0x29, 0x04, 0xD0,
+        0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn wildcard_expanded_nsec_is_not_accepted_as_proof() {
+        let key_recs = answers(WILDCARD_NSEC_DNSKEY);
+        let dnskeys = keys(&key_recs);
+        let verified = |authority: &[ResourceRecord]| {
+            verified_denial_records(
+                authority,
+                RecordType::NSEC,
+                "internet.nl.",
+                &dnskeys,
+                FIXED_WILDCARD_NOW,
+            )
+            .len()
+        };
+
+        // As served, under its own name, the NSEC is fine.
+        let mut answer = full_message(WILDCARD_OWNER_NSEC);
+        answer.authority.retain(|rr| rr.name == "*.internet.nl.");
+        assert_eq!(verified(&answer.authority), 1);
+
+        // Renamed, its signature still verifies: the RRSIG says two labels, so
+        // the signed owner is rebuilt as "*.internet.nl." whatever name it
+        // arrives under. "a.internet.nl." sorts after the NSEC's next name,
+        // which turns a narrow range into one that wraps the whole zone.
+        for rr in &mut answer.authority {
+            rr.name = "a.internet.nl.".to_string();
+        }
+        let renamed = records_of(&answer.authority, RecordType::NSEC);
+        let sig = rrsigs_covering(&answer.authority, RecordType::NSEC)
+            .next()
+            .unwrap();
+        assert!(verify_rrsig(&renamed, sig, &dnskeys, FIXED_WILDCARD_NOW).is_ok());
+        assert!(nsec_covers(renamed[0], "www.internet.nl."));
+
+        // So it has to be turned away on its label count.
+        assert_eq!(verified(&answer.authority), 0);
     }
 
     // Captured live from 1.1.1.1 on 2026-07-19 (see PR #70). FIXED_NOW is
