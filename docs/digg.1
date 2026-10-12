@@ -121,6 +121,9 @@ zone up to the built-in IANA root anchors, without trusting the
 resolver's AD bit.
 Positive answers, and negative answers (NXDOMAIN / NODATA) via their
 NSEC or NSEC3 denial-of-existence proofs, are both validated.
+An answer synthesized from a wildcard is SECURE only if it also carries
+the NSEC or NSEC3 proof that the queried name does not exist; without
+that proof it is BOGUS.
 Reports each link and an overall SECURE, INSECURE, or BOGUS status.
 Implies
 .Cm +dnssec .
