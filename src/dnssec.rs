@@ -866,11 +866,20 @@ fn validate_denial(
         });
     }
 
-    // Signatures are valid; now the cover proof.
+    // Signatures are valid; now the cover proof, over only the records that
+    // are individually signed by this zone and not wildcard-expanded. The
+    // check above passes as soon as one RRset verifies, which an unsigned or
+    // replayed NSEC riding along with a genuine SOA would satisfy.
+    let nsec_recs =
+        verified_denial_records(&answer.authority, RecordType::NSEC, &signer, &dnskeys, now);
+    let nsec3_recs =
+        verified_denial_records(&answer.authority, RecordType::NSEC3, &signer, &dnskeys, now);
     let proven = if !nsec3_recs.is_empty() {
         prove_nsec3(&nsec3_recs, qname, &signer, qtype)
-    } else {
+    } else if !nsec_recs.is_empty() {
         prove_nsec(&nsec_recs, qname, qtype)
+    } else {
+        Err(format!("no validly signed {} record", denial_type))
     };
 
     match proven {
@@ -2598,5 +2607,43 @@ mod tests {
     fn parent_zone_walks_toward_root() {
         assert_eq!(parent_zone("cloudflare.com."), "com.");
         assert_eq!(parent_zone("com."), ".");
+    }
+
+    /// The same replay against a negative answer: www.internet.nl exists, and
+    /// the renamed wildcard NSEC used to "prove" that it does not.
+    #[test]
+    fn replayed_wildcard_nsec_cannot_prove_nxdomain() {
+        let mut answer = full_message(WILDCARD_OWNER_NSEC);
+        for rr in &mut answer.authority {
+            if rr.name == "*.internet.nl." {
+                rr.name = "a.internet.nl.".to_string();
+            }
+        }
+        let fetch = denial_fetch("internet.nl.", WILDCARD_NSEC_DNSKEY);
+        let outcome = validate_denial(
+            &answer,
+            "www.internet.nl",
+            RecordType::A,
+            FIXED_WILDCARD_NOW,
+            &fetch,
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome, DenialOutcome::Bogus { reason, .. } if reason.contains("no validly signed NSEC")),
+            "a replayed wildcard NSEC must not prove NXDOMAIN"
+        );
+
+        // Left alone, the same message is a valid NODATA proof for the name
+        // it was actually issued for.
+        let genuine = full_message(WILDCARD_OWNER_NSEC);
+        let outcome = validate_denial(
+            &genuine,
+            "*.internet.nl",
+            RecordType::Unknown(13),
+            FIXED_WILDCARD_NOW,
+            &fetch,
+        )
+        .unwrap();
+        assert!(matches!(outcome, DenialOutcome::Proven { .. }));
     }
 }
