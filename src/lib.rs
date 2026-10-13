@@ -191,6 +191,9 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
     // Standard query mode
     let server = resolve_server()?;
     let mut exit_code = 0;
+    // One DoT connection carries the question and everything +validate asks
+    // afterwards. It is opened by the first query, not here.
+    let dot_session = opts.dot.then(|| dot::DotSession::new(&server, timeout));
 
     if opts.validate && (opts.json || opts.yaml || opts.tsv) {
         // The structured formats have no place for the validation report, and
@@ -224,8 +227,8 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
         // lookups through the same closure, so a user who chose DoT or DoH
         // does not have the follow-up questions leave in plain text.
         let send = |query: &[u8]| -> Result<transport::QueryResult, DnsError> {
-            if opts.dot {
-                dot::send_dot_query(&server, query, timeout)
+            if let Some(ref session) = dot_session {
+                session.send(query)
             } else if let Some(ref url) = doh_url {
                 doh::send_doh_query(url, query, timeout)
             } else {
