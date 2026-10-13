@@ -128,6 +128,11 @@ The answer is followed from the queried name: each CNAME on the way must
 be signed by the zone that holds it, or be the CNAME that a signed DNAME
 produces, and every zone that signed a step is validated to the root.
 A chain that passes through an unsigned zone is INSECURE.
+An unsigned answer is INSECURE only when a signed parent zone proves that
+the delegation below it is unsigned; an answer that is merely missing its
+signatures is BOGUS.
+A resolver that removes DNSSEC records therefore makes every signed name
+BOGUS; use one that returns them.
 Reports each link and an overall SECURE, INSECURE, or BOGUS status.
 Implies
 .Cm +dnssec .
