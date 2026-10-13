@@ -37,6 +37,42 @@ mod tests {
     }
 
     #[test]
+    fn dots_inside_a_label_survive_a_round_trip() {
+        // One 10-byte label "first.last", then "example", then "com": the
+        // shape of an SOA mailbox for first.last@example.com.
+        let mut wire = vec![10];
+        wire.extend_from_slice(b"first.last");
+        wire.extend_from_slice(&[7]);
+        wire.extend_from_slice(b"example");
+        wire.extend_from_slice(&[3]);
+        wire.extend_from_slice(b"com");
+        wire.push(0);
+
+        let (name, consumed) = decode_name(&wire, 0).unwrap();
+        assert_eq!(name, r"first\.last.example.com.");
+        assert_eq!(consumed, wire.len());
+        // Encoding the decoded name gives back the same three labels, not four.
+        assert_eq!(encode_name(&name).unwrap(), wire);
+
+        // A backslash in a label is escaped the same way.
+        let wire = [3, b'a', b'\\', b'b', 0];
+        let (name, _) = decode_name(&wire, 0).unwrap();
+        assert_eq!(name, r"a\\b.");
+        assert_eq!(encode_name(&name).unwrap(), wire);
+
+        // \DDD names a byte by value; an escaped dot can end the last label.
+        assert_eq!(encode_name(r"a\046b.").unwrap(), [3, b'a', b'.', b'b', 0]);
+        assert_eq!(encode_name(r"a\.").unwrap(), [2, b'a', b'.', 0]);
+        assert_eq!(encode_name(r"a\..").unwrap(), [2, b'a', b'.', 0]);
+        assert!(encode_name(r"a\999.").is_err());
+        assert!(encode_name("a\\").is_err());
+        // Plain names are unchanged.
+        assert_eq!(encode_name(".").unwrap(), [0]);
+        assert_eq!(encode_name("").unwrap(), [0]);
+        assert_eq!(encode_name("a.b.").unwrap(), encode_name("a.b").unwrap());
+    }
+
+    #[test]
     fn invalid_domain_names_return_protocol_errors() {
         assert!(matches!(
             encode_name("a..example"),
