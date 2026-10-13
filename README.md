@@ -4,6 +4,21 @@ A modern DNS lookup CLI tool written in Rust. Like `dig`, but with built-in supp
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
+## Changed in v0.6.0
+
+> [!IMPORTANT]
+> `+validate` is stricter in this release. Some answers that reported `SECURE` before now report `INSECURE` or `BOGUS`. The old result was wrong in each case.
+
+**Changed**
+
+- **`+validate` follows the answer from the name you asked for.** Earlier versions validated only the last RRset in the answer and ignored any CNAME in front of it. Now every CNAME in the chain must be signed, and every zone that signed a step is validated to the root. A name whose CNAME points into an unsigned zone (a CDN, for example) now reports `INSECURE` where it could report `SECURE`.
+- **`+validate` checks who signed.** A signature counts only if it comes from the zone that holds the record. Anything else is `BOGUS` (exit code `2`).
+- **Wildcard answers need their proof.** An answer synthesized from a wildcard is `SECURE` only with the `NSEC` / `NSEC3` proof that the name itself does not exist. Without it the answer is `BOGUS`.
+
+**Added**
+
+- **DNAME.** `DNAME` records are decoded and can be queried by name. `+validate` validates a DNAME redirection: the DNAME must be signed, and the unsigned CNAME that comes with it must be the one the DNAME produces.
+
 ## Changed in v0.5.0
 
 > [!IMPORTANT]
@@ -263,7 +278,7 @@ stdout and per-query failures to stderr, so pipelines see clean data.
 | `+dot`         | DNS-over-TLS                             |
 | `+doh[=NAME]`  | DNS-over-HTTPS (cloudflare, google, quad9, opendns, adguard, wikimedia, or a URL) |
 | `+dnssec`      | Request DNSSEC records                   |
-| `+validate`    | Validate the DNSSEC chain locally (incl. NSEC/NSEC3 negative answers) |
+| `+validate`    | Validate the DNSSEC chain locally (incl. CNAME/DNAME chains, wildcards, NSEC/NSEC3 negative answers) |
 | `+cd`          | Checking disabled (fetch DNSSEC-bogus data) |
 | `+subnet=IP[/N]` | EDNS Client Subnet (RFC 7871); `+subnet=0` opts out |
 | `+nsid`        | Request the server identifier (RFC 5001) |

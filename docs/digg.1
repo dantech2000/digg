@@ -124,6 +124,10 @@ NSEC or NSEC3 denial-of-existence proofs, are both validated.
 An answer synthesized from a wildcard is SECURE only if it also carries
 the NSEC or NSEC3 proof that the queried name does not exist; without
 that proof it is BOGUS.
+The answer is followed from the queried name: each CNAME on the way must
+be signed by the zone that holds it, or be the CNAME that a signed DNAME
+produces, and every zone that signed a step is validated to the root.
+A chain that passes through an unsigned zone is INSECURE.
 Reports each link and an overall SECURE, INSECURE, or BOGUS status.
 Implies
 .Cm +dnssec .
