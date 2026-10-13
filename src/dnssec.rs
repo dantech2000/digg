@@ -156,19 +156,22 @@ pub fn validate(
 }
 
 /// How many times to ask again when a response is unusable.
-const INCOMPLETE_RETRIES: u32 = 2;
+const INCOMPLETE_RETRIES: u32 = 3;
 
 /// Run `send` until it yields a response that can carry DNSSEC data.
 ///
-/// Two kinds of response cannot, and neither is evidence about the zone:
+/// Four kinds of response cannot, and none is evidence about the zone:
 ///
 /// - Truncated. The transport already retries a truncated UDP response over
 ///   TCP, so a TC bit that reaches here was set on the TCP response itself.
+/// - A failure such as SERVFAIL. The resolver did not answer the question; it
+///   did not say the answer is empty.
+/// - An empty answer to a DNSKEY query.
 /// - Without an EDNS OPT record. Every query here sets the DO bit, and a
 ///   resolver that understood it answers with OPT. One without it is a
 ///   resolver that dropped the request's EDNS, and its DNSSEC records too.
 ///
-/// Some forwarders return both now and then, with an empty answer. Taken at
+/// Resolvers return each of these now and then, with an empty answer. Taken at
 /// face value that reads as "this zone has no keys" or "no proof was sent",
 /// and turns a resolver hiccup into a BOGUS verdict. It is a failed lookup:
 /// ask again after `pause`, and if it keeps happening, say so rather than
@@ -187,14 +190,30 @@ fn complete_response(
         let message = send()?;
         if message.header.tc {
             problem = "a truncated response";
+        } else if !matches!(message.header.rcode, Rcode::NoError | Rcode::NxDomain) {
+            // SERVFAIL and the like: the resolver did not answer. From a
+            // validating resolver that can mean it judged the data bogus, in
+            // which case +cd makes it hand the data over.
+            problem = "a failure response";
         } else if message.edns.is_none() {
             problem = "a response without EDNS";
+        } else if rtype == RecordType::DNSKEY
+            && !message
+                .answers
+                .iter()
+                .any(|rr| rr.rtype == RecordType::DNSKEY)
+        {
+            // DNSKEY is only ever asked of a zone that something claims to be
+            // signed by, so "it has none" is never the expected answer.
+            // Resolvers do return it in passing: 1.1.1.1 answered half of a
+            // run of cdc.gov DNSKEY queries with an empty NOERROR.
+            problem = "an empty answer";
         } else {
             return Ok(message);
         }
     }
     Err(DnsError::Protocol(format!(
-        "resolver kept returning {} for {} {}; cannot validate (try another resolver, e.g. @1.1.1.1)",
+        "resolver kept returning {} for {} {}; cannot validate (try another resolver, e.g. @1.1.1.1, or +cd)",
         problem, name, rtype
     )))
 }
@@ -5206,6 +5225,24 @@ mod tests {
         .unwrap()
     }
 
+    /// SERVFAIL with an OPT record, as a validating resolver sends it.
+    fn servfail() -> DnsMessage {
+        DnsMessage::parse(&[
+            0x12, 0x34, 0x81, 0x82, 0, 0, 0, 0, 0, 0, 0, 1, // header, RCODE 2
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0, // OPT, DO set
+        ])
+        .unwrap()
+    }
+
+    /// NOERROR with an OPT record and no answer.
+    fn empty_answer() -> DnsMessage {
+        DnsMessage::parse(&[
+            0x12, 0x34, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 1, // header
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0, // OPT, DO set
+        ])
+        .unwrap()
+    }
+
     /// Header only: NOERROR, nothing in it, and no OPT record.
     fn without_edns() -> DnsMessage {
         DnsMessage::parse(&[0x12, 0x34, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap()
@@ -5230,6 +5267,15 @@ mod tests {
         .unwrap();
         assert_eq!(calls.get(), 3);
         assert!(!message.answers.is_empty());
+
+        // An empty answer is a real answer for any type but DNSKEY.
+        let calls = Cell::new(0);
+        complete_response("example.org.", RecordType::DS, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(empty_answer())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -5241,6 +5287,8 @@ mod tests {
                 "a truncated response for org. DNSKEY",
             ),
             (without_edns, "a response without EDNS for org. DNSKEY"),
+            (servfail, "a failure response for org. DNSKEY"),
+            (empty_answer, "an empty answer for org. DNSKEY"),
         ] {
             let calls = Cell::new(0);
             let err = complete_response("org.", RecordType::DNSKEY, Duration::ZERO, || {
