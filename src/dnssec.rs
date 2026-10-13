@@ -10,7 +10,7 @@ use crate::protocol::edns::EdnsOptions;
 use crate::protocol::message::DnsMessage;
 use crate::protocol::name::encode_name;
 use crate::protocol::record::{RData, ResourceRecord};
-use crate::protocol::types::{RecordClass, RecordType};
+use crate::protocol::types::{Rcode, RecordClass, RecordType};
 use crate::transport;
 use aws_lc_rs::{digest, signature};
 use std::collections::HashMap;
@@ -185,7 +185,34 @@ pub fn validate_with(
         Ok(message)
     };
 
+    validate_answer(answer, qname, qtype, now, fetch, &mut Vec::new())
+}
+
+/// The validation itself. `trusted` holds zones already verified to the root;
+/// it starts empty, except in tests that pin part of the chain.
+fn validate_answer(
+    answer: &DnsMessage,
+    qname: &str,
+    qtype: RecordType,
+    now: u32,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+    trusted: &mut Vec<String>,
+) -> Result<ValidationReport, DnsError> {
     let mut links = Vec::new();
+
+    // A response that is neither an answer nor a denial has nothing in it to
+    // validate. SERVFAIL from a validating resolver often means the data
+    // failed validation there; +cd asks it to hand the data over anyway.
+    if !matches!(answer.header.rcode, Rcode::NoError | Rcode::NxDomain) {
+        return Ok(ValidationReport {
+            links,
+            status: ChainStatus::Insecure(format!(
+                "resolver answered {}; there is no answer to validate",
+                answer.header.rcode
+            )),
+        });
+    }
+
     // Every zone that signed a step of the answer. Each is walked to the root.
     let mut zones: Vec<String> = Vec::new();
     // How the chain ended, when it did not end at a signed RRset.
@@ -218,7 +245,11 @@ pub fn validate_with(
                     links.append(&mut denial_links);
                     push_zone(&mut zones, signer);
                 }
-                DenialOutcome::Unsigned(why) => tail = Some(ChainStatus::Insecure(why)),
+                DenialOutcome::Unsigned => {
+                    tail = Some(classify_unsigned(
+                        &current, now, fetch, &mut links, trusted,
+                    )?)
+                }
                 DenialOutcome::Bogus {
                     mut denial_links,
                     reason,
@@ -247,9 +278,12 @@ pub fn validate_with(
         match outcome {
             Step::Signed(zone) => push_zone(&mut zones, zone),
             Step::Unsigned => {
-                // Walk ancestors to find whether an unsigned RRset is
-                // legitimate. Nothing past it can be trusted either way.
-                tail = Some(classify_unsigned(&current, fetch));
+                // An unsigned RRset is legitimate only below a proven
+                // unsigned delegation. Nothing past it can be trusted either
+                // way.
+                tail = Some(classify_unsigned(
+                    &current, now, fetch, &mut links, trusted,
+                )?);
                 resolved = true;
                 break;
             }
@@ -275,9 +309,8 @@ pub fn validate_with(
 
     // 2. Walk the chain from each signing zone to the root anchors. A zone
     // that an earlier walk already verified is not walked again.
-    let mut trusted = Vec::new();
     for zone in zones {
-        let report = chain_to_root(zone, now, fetch, links, &mut trusted)?;
+        let report = chain_to_root(zone, now, fetch, links, trusted)?;
         links = report.links;
         if report.status != ChainStatus::Secure {
             return Ok(ValidationReport {
@@ -636,14 +669,36 @@ fn chain_to_root(
         let ds_msg = fetch(&zone, RecordType::DS)?;
         let ds_set = records_of(&ds_msg.answers, RecordType::DS);
         if ds_set.is_empty() {
-            links.push(LinkReport::ok(
-                zone.clone(),
-                "no DS at parent (unsigned delegation)".to_string(),
-            ));
-            return Ok(ValidationReport {
-                links,
-                status: ChainStatus::Insecure(format!("{}: unsigned delegation, chain ends", zone)),
-            });
+            // A zone with keys but no DS is an island: its signatures cannot
+            // be anchored. That is only believable when the parent proves it
+            // publishes no DS. Otherwise deleting the DS from a response would
+            // turn any signed zone into an "unsigned" one.
+            return match ds_denial(&ds_msg, &zone, now, fetch)? {
+                Delegation::Unsigned { signer, detail } => {
+                    links.push(LinkReport::ok(zone.clone(), detail));
+                    let report = chain_to_root(signer, now, fetch, links, trusted)?;
+                    Ok(match report.status {
+                        ChainStatus::Secure => ValidationReport {
+                            links: report.links,
+                            status: ChainStatus::Insecure(format!(
+                                "{}: unsigned delegation, chain ends",
+                                zone
+                            )),
+                        },
+                        _ => report,
+                    })
+                }
+                Delegation::NotACut => {
+                    let detail = "no DS at parent, and the parent shows no delegation here";
+                    let reason = format!("{}: {}", zone, detail);
+                    bogus(links, zone.clone(), detail, reason)
+                }
+                Delegation::Unproven(why) => {
+                    let detail = format!("no DS at parent, and {}", why);
+                    let reason = format!("{}: {}", zone, detail);
+                    bogus(links, zone.clone(), detail, reason)
+                }
+            };
         }
 
         let ds_match = ds_set.iter().find_map(|ds| {
@@ -712,39 +767,214 @@ fn chain_to_root(
     }
 }
 
-/// For an unsigned answer, decide Insecure vs Bogus by looking for the
-/// nearest unsigned delegation above the query name.
+/// For an unsigned RRset or an unsigned negative answer at `name`, decide
+/// Insecure vs Bogus.
+///
+/// Unsigned data is legitimate only at or below an unsigned delegation, and a
+/// signed parent proves that delegation: its NSEC or NSEC3 for the delegation
+/// point has NS set and no DS. So walk down from the top-level domain asking
+/// for DS at each name. A DS means a signed delegation; keep going. A proof
+/// that the name is an unsigned delegation ends the walk as Insecure, once the
+/// zone that signed the proof is itself verified to the root. A name that is
+/// not a delegation is passed over. Reaching `name` without such a proof means
+/// its zone is signed and the missing signatures are the problem.
+///
+/// A response with no DS and no proof counts for nothing: it is what a
+/// resolver that strips DNSSEC records, or an attacker, would send.
 fn classify_unsigned(
-    qname: &str,
+    name: &str,
+    now: u32,
     fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
-) -> ChainStatus {
-    let mut zone = qname.trim_end_matches('.').to_string();
-    loop {
-        let probe = format!("{}.", zone);
-        match fetch(&probe, RecordType::DS) {
-            Ok(msg) => {
-                let has_ds = msg.answers.iter().any(|rr| rr.rtype == RecordType::DS);
-                if !has_ds {
-                    return ChainStatus::Insecure(format!(
-                        "{} has no DS (unsigned zone); answer cannot be validated",
-                        probe
-                    ));
-                }
-            }
-            Err(e) => {
-                return ChainStatus::Insecure(format!("could not probe DS for {}: {}", probe, e))
-            }
+    links: &mut Vec<LinkReport>,
+    trusted: &mut Vec<String>,
+) -> Result<ChainStatus, DnsError> {
+    let labels: Vec<&str> = name
+        .trim_end_matches('.')
+        .split('.')
+        .filter(|l| !l.is_empty())
+        .collect();
+    let cuts: Vec<String> = (1..=labels.len())
+        .map(|depth| format!("{}.", labels[labels.len() - depth..].join(".")))
+        .collect();
+
+    // Results are discarded: this only warms the memo in validate_with so the
+    // walk below is one parallel round, not one round trip per label.
+    parallel::map(&cuts, usize::MAX, |cut| {
+        let _ = fetch(cut, RecordType::DS);
+    });
+
+    for cut in &cuts {
+        let ds_msg = fetch(cut, RecordType::DS)?;
+        if owned_by(&ds_msg.answers, cut, RecordType::DS)
+            .next()
+            .is_some()
+        {
+            continue;
         }
-        match zone.split_once('.') {
-            Some((_, rest)) => zone = rest.to_string(),
-            None => {
-                // Every cut up to the TLD has a DS, yet the answer is unsigned.
-                return ChainStatus::Bogus(
-                    "zone chain is signed but the answer carries no RRSIG".to_string(),
-                );
+        match ds_denial(&ds_msg, cut, now, fetch)? {
+            Delegation::Unsigned { signer, detail } => {
+                links.push(LinkReport::ok(cut.clone(), detail));
+                let report = chain_to_root(signer, now, fetch, std::mem::take(links), trusted)?;
+                *links = report.links;
+                return Ok(match report.status {
+                    ChainStatus::Secure => ChainStatus::Insecure(format!(
+                        "{} is an unsigned delegation; answer cannot be validated",
+                        cut
+                    )),
+                    other => other,
+                });
+            }
+            Delegation::NotACut => {}
+            Delegation::Unproven(why) => {
+                links.push(LinkReport::failed(
+                    cut.clone(),
+                    format!("no DS, and {}", why),
+                ));
+                return Ok(ChainStatus::Bogus(format!(
+                    "{} carries no RRSIG, and nothing proves {} is an unsigned delegation",
+                    name, cut
+                )));
             }
         }
     }
+    Ok(ChainStatus::Bogus(format!(
+        "{} is in a signed zone but carries no RRSIG",
+        name
+    )))
+}
+
+/// What a signed parent says about a name that has no DS.
+enum Delegation {
+    /// An unsigned delegation: NS without DS, or an opt-out NSEC3 span that
+    /// may hold one. `signer` is the parent zone that signed the proof.
+    Unsigned { signer: String, detail: String },
+    /// The name exists in the parent zone and is not delegated.
+    NotACut,
+    /// No valid proof either way.
+    Unproven(String),
+}
+
+/// Read the denial in a DS response for `name`: is `name` an unsigned
+/// delegation, according to records its parent zone signed?
+fn ds_denial(
+    ds_msg: &DnsMessage,
+    name: &str,
+    now: u32,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+) -> Result<Delegation, DnsError> {
+    // DS lives on the parent side of a cut, so the proof must come from a zone
+    // above `name`. The child's own NSEC at its apex says nothing about DS.
+    let signer = ds_msg
+        .authority
+        .iter()
+        .filter_map(|rr| match &rr.rdata {
+            RData::RRSIG {
+                type_covered,
+                signer,
+                ..
+            } if matches!(type_covered, RecordType::NSEC | RecordType::NSEC3)
+                && in_zone(name, signer)
+                && !names_equal(name, signer) =>
+            {
+                Some(signer)
+            }
+            _ => None,
+        })
+        .max_by_key(|signer| label_count(signer));
+    let Some(signer) = signer else {
+        return Ok(Delegation::Unproven(format!(
+            "no parent zone signed a proof that {} has none",
+            name
+        )));
+    };
+
+    let dnskey_msg = fetch(signer, RecordType::DNSKEY)?;
+    let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
+    let nsecs = verified_denial_records(&ds_msg.authority, RecordType::NSEC, signer, &dnskeys, now);
+    let nsec3s =
+        verified_denial_records(&ds_msg.authority, RecordType::NSEC3, signer, &dnskeys, now);
+    Ok(delegation_proof(&nsecs, &nsec3s, name, signer))
+}
+
+/// The proof itself, over denial records already known to be validly signed
+/// by `signer`.
+fn delegation_proof(
+    nsecs: &[&ResourceRecord],
+    nsec3s: &[&ResourceRecord],
+    name: &str,
+    signer: &str,
+) -> Delegation {
+    // The type bitmap of the NSEC/NSEC3 that matches `name` settles it.
+    let from_bitmap = |types: &[RecordType], kind: &str| {
+        if types.contains(&RecordType::DS) {
+            Delegation::Unproven(format!("{} at {} says a DS exists", kind, name))
+        } else if types.contains(&RecordType::NS) && !types.contains(&RecordType::SOA) {
+            Delegation::Unsigned {
+                signer: signer.to_string(),
+                detail: format!(
+                    "unsigned delegation proven: {} by {} has NS and no DS",
+                    kind, signer
+                ),
+            }
+        } else {
+            Delegation::NotACut
+        }
+    };
+
+    for rr in nsecs {
+        let RData::NSEC {
+            next_domain,
+            type_bitmaps,
+        } = &rr.rdata
+        else {
+            continue;
+        };
+        if names_equal(&rr.name, name) {
+            return from_bitmap(type_bitmaps, "NSEC");
+        }
+        if nsec_covers(rr, name) {
+            // Names exist below `name`, so it is an empty non-terminal: it
+            // exists, owns nothing, and is not a delegation.
+            if in_zone(next_domain, name) {
+                return Delegation::NotACut;
+            }
+            return Delegation::Unproven(format!("{} does not exist in {}", name, signer));
+        }
+    }
+
+    for rr in nsec3s {
+        let RData::NSEC3 {
+            iterations,
+            salt,
+            type_bitmaps,
+            ..
+        } = &rr.rdata
+        else {
+            continue;
+        };
+        if nsec3_hash(name, *iterations, salt).is_some_and(|h| nsec3_matches(rr, &h)) {
+            return from_bitmap(type_bitmaps, "NSEC3");
+        }
+    }
+    if !nsec3s.is_empty() {
+        return match nsec3_closest_encloser(nsec3s, name, signer) {
+            // RFC 5155 §6: an opt-out span may hold unsigned delegations
+            // that have no NSEC3 of their own.
+            Ok(proof) if proof.opt_out => Delegation::Unsigned {
+                signer: signer.to_string(),
+                detail: format!(
+                    "unsigned delegation possible: opt-out NSEC3 by {} covers it",
+                    signer
+                ),
+            },
+            Ok(_) => Delegation::Unproven(format!("{} does not exist in {}", name, signer)),
+            Err(why) => Delegation::Unproven(why),
+        };
+    }
+    Delegation::Unproven(format!(
+        "no signed NSEC/NSEC3 from {} proves that {} has none",
+        signer, name
+    ))
 }
 
 fn parent_zone(zone: &str) -> String {
@@ -1045,8 +1275,9 @@ enum DenialOutcome {
         signer: String,
         denial_links: Vec<LinkReport>,
     },
-    /// No signed denial records present — an unsigned zone, legitimately.
-    Unsigned(String),
+    /// No signed denial records for the name. Whether that is legitimate is
+    /// for classify_unsigned to decide.
+    Unsigned,
     /// Denial records present but a signature failed or the proof does not
     /// cover the query. Never let this fall through to Secure.
     Bogus {
@@ -1066,10 +1297,7 @@ fn validate_denial(
     let nsec3_recs = records_of(&answer.authority, RecordType::NSEC3);
 
     if nsec_recs.is_empty() && nsec3_recs.is_empty() {
-        return Ok(DenialOutcome::Unsigned(format!(
-            "negative answer for {} carries no NSEC/NSEC3 records (unsigned zone)",
-            qname
-        )));
+        return Ok(DenialOutcome::Unsigned);
     }
 
     // The zone that can deny `qname` is one that contains it. After a CNAME
@@ -1106,10 +1334,7 @@ fn validate_denial(
         .filter(|(signer, _)| in_zone(qname, signer))
         .max_by_key(|(signer, _)| label_count(signer))
     else {
-        return Ok(DenialOutcome::Unsigned(format!(
-            "negative answer for {} carries no NSEC/NSEC3 from a zone that contains it",
-            qname
-        )));
+        return Ok(DenialOutcome::Unsigned);
     };
     let signer = signer.clone();
 
@@ -1384,6 +1609,47 @@ fn prove_nsec3(
     }
 
     // NXDOMAIN: closest-encloser proof.
+    let proof = nsec3_closest_encloser(nsec3s, qname, zone)?;
+    let _ = qtype;
+    if proof.wildcard_denied || proof.opt_out {
+        Ok(format!(
+            "NXDOMAIN proven: closest encloser {}, next-closer covered{}",
+            proof.encloser,
+            if proof.opt_out {
+                " (opt-out)"
+            } else {
+                ", wildcard covered"
+            }
+        ))
+    } else {
+        Err("wildcard existence not denied".to_string())
+    }
+}
+
+struct ClosestEncloser {
+    encloser: String,
+    /// The NSEC3 covering the next-closer name has opt-out set (RFC 5155 §8.6).
+    opt_out: bool,
+    /// An NSEC3 covers or matches "*.<encloser>".
+    wildcard_denied: bool,
+}
+
+/// RFC 5155 §8.3: find the closest encloser of `qname` and the NSEC3 that
+/// covers its next-closer name. An error means `qname` is not shown to be
+/// absent.
+fn nsec3_closest_encloser(
+    nsec3s: &[&ResourceRecord],
+    qname: &str,
+    zone: &str,
+) -> Result<ClosestEncloser, String> {
+    let (iterations, salt) = match &nsec3s[0].rdata {
+        RData::NSEC3 {
+            iterations, salt, ..
+        } => (*iterations, salt.clone()),
+        _ => return Err("not an NSEC3 record".to_string()),
+    };
+    let hash = |name: &str| nsec3_hash(name, iterations, &salt);
+
     // 1. Find the closest encloser: the longest ancestor of qname whose hash
     //    matches an NSEC3 owner exactly.
     let labels: Vec<&str> = qname.trim_end_matches('.').split('.').collect();
@@ -1433,24 +1699,15 @@ fn prove_nsec3(
     let opt_out = matches!(&nc_rr.rdata, RData::NSEC3 { flags, .. } if flags & 0x01 != 0);
     let wildcard = format!("*.{}", ce);
     let wc_hash = hash(&wildcard).ok_or("cannot hash wildcard")?;
-    let wc_covered = nsec3s
+    let wildcard_denied = nsec3s
         .iter()
         .any(|rr| nsec3_covers(rr, &wc_hash) || nsec3_matches(rr, &wc_hash));
-    let _ = qtype;
 
-    if wc_covered || opt_out {
-        Ok(format!(
-            "NXDOMAIN proven: closest encloser {}, next-closer covered{}",
-            ce,
-            if opt_out {
-                " (opt-out)"
-            } else {
-                ", wildcard covered"
-            }
-        ))
-    } else {
-        Err("wildcard existence not denied".to_string())
-    }
+    Ok(ClosestEncloser {
+        encloser: ce,
+        opt_out,
+        wildcard_denied,
+    })
 }
 
 // === Wildcard expansion (RFC 4035 §5.3.4, RFC 5155 §8.8) ===
@@ -1938,7 +2195,7 @@ mod tests {
                     .any(|l| l.detail.contains("NODATA proven")));
             }
             DenialOutcome::Bogus { reason, .. } => panic!("expected proven, got bogus: {}", reason),
-            DenialOutcome::Unsigned(w) => panic!("expected proven, got unsigned: {}", w),
+            DenialOutcome::Unsigned => panic!("expected proven, got unsigned"),
         }
     }
 
@@ -1979,7 +2236,7 @@ mod tests {
                     .any(|l| l.detail.contains("NXDOMAIN proven")));
             }
             DenialOutcome::Bogus { reason, .. } => panic!("expected proven, got bogus: {}", reason),
-            DenialOutcome::Unsigned(w) => panic!("expected proven, got unsigned: {}", w),
+            DenialOutcome::Unsigned => panic!("expected proven, got unsigned"),
         }
     }
 
@@ -2026,7 +2283,7 @@ mod tests {
             &fetch,
         )
         .unwrap();
-        assert!(matches!(outcome, DenialOutcome::Unsigned(_)));
+        assert!(matches!(outcome, DenialOutcome::Unsigned));
     }
 
     #[test]
@@ -2173,10 +2430,8 @@ mod tests {
         0x00, 0x00,
     ];
 
-    /// Run the whole validation against a wildcard fixture. Only the signing
-    /// zone's DNSKEY is served, so a legitimate answer ends at "no DS at
-    /// parent" (Insecure) instead of walking to the root; what matters here is
-    /// whether it gets past the wildcard check or stops there as Bogus.
+    /// Run the whole validation against a wildcard fixture, with its signing
+    /// zone taken as verified so that only that zone's DNSKEY is needed.
     fn validate_wildcard(
         answer: &DnsMessage,
         qname: &str,
@@ -2184,7 +2439,7 @@ mod tests {
         dnskey: &'static [u8],
     ) -> ValidationReport {
         let fetch = denial_fetch(zone, dnskey);
-        validate_with(answer, qname, RecordType::TXT, FIXED_WILDCARD_NOW, &fetch).unwrap()
+        validate_pinned(answer, qname, RecordType::TXT, &fetch, &[zone])
     }
 
     fn wildcard_link(report: &ValidationReport) -> Option<&LinkReport> {
@@ -2208,7 +2463,7 @@ mod tests {
             "{}",
             link.detail
         );
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     #[test]
@@ -2229,7 +2484,7 @@ mod tests {
             "{}",
             link.detail
         );
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     /// The attack this check exists for: the wildcard's records and signature
@@ -3140,10 +3395,8 @@ mod tests {
         0x00, 0x80, 0x00, 0x00, 0x00,
     ];
 
-    /// Serve the DNSKEY set of the listed zones and nothing else. A legitimate
-    /// answer then ends at "no DS at parent" (Insecure) for its first zone
-    /// instead of walking to the root; what these tests look at is which
-    /// steps verified on the way and whether anything stopped as Bogus.
+    /// Serve the DNSKEY set of the listed zones and nothing else. Tests pair
+    /// it with validate_pinned, which takes those zones as verified.
     fn zone_keys(
         zones: &'static [(&'static str, &'static [u8])],
     ) -> impl Fn(&str, RecordType) -> Result<DnsMessage, DnsError> {
@@ -3161,14 +3414,7 @@ mod tests {
     fn cname_chain_validates_every_step() {
         let answer = full_message(CNAME_CHAIN);
         let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
-        let report = validate_with(
-            &answer,
-            "www.sidn.nl",
-            RecordType::A,
-            FIXED_WILDCARD_NOW,
-            &fetch,
-        )
-        .unwrap();
+        let report = validate_pinned(&answer, "www.sidn.nl", RecordType::A, &fetch, &["sidn.nl."]);
         assert!(
             has_link(
                 &report,
@@ -3178,7 +3424,7 @@ mod tests {
         );
         assert!(has_link(&report, "A RRSIG verified"), "A step missing");
         assert!(report.links.iter().all(|l| l.ok));
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     /// The CNAME is what ties the signed A record to the name that was asked
@@ -3190,17 +3436,15 @@ mod tests {
         answer.answers.retain(|rr| {
             !matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == RecordType::CNAME)
         });
-        let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
-        let report = validate_with(
-            &answer,
-            "www.sidn.nl",
-            RecordType::A,
-            FIXED_WILDCARD_NOW,
-            &fetch,
-        )
-        .unwrap();
+        let fetch = served(
+            &[("sidn.nl.", RecordType::DNSKEY, SIDN_DNSKEY)],
+            &["nl.", "sidn.nl."],
+        );
+        let report = validate_pinned(&answer, "www.sidn.nl", RecordType::A, &fetch, &["sidn.nl."]);
+        // sidn.nl is signed all the way down, so a CNAME without a signature
+        // is not an unsigned zone's CNAME; it is a stripped one.
         assert!(
-            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("www.sidn.nl.")),
+            matches!(&report.status, ChainStatus::Bogus(why) if why.contains("www.sidn.nl.")),
             "{:?}",
             report.status
         );
@@ -3210,22 +3454,28 @@ mod tests {
     #[test]
     fn cname_into_an_unsigned_zone_is_insecure() {
         let answer = full_message(CNAME_TO_UNSIGNED);
-        let fetch = zone_keys(&[("state.gov.", STATE_GOV_DNSKEY)]);
-        let report = validate_with(
+        let fetch = served(
+            &[
+                ("state.gov.", RecordType::DNSKEY, STATE_GOV_DNSKEY),
+                ("net.", RecordType::DNSKEY, NET_DNSKEY),
+                ("cloudfront.net.", RecordType::DS, DS_CLOUDFRONT_NET),
+            ],
+            &["net."],
+        );
+        let report = validate_pinned(
             &answer,
             "www.state.gov",
             RecordType::A,
-            FIXED_WILDCARD_NOW,
             &fetch,
-        )
-        .unwrap();
+            &["state.gov.", "net."],
+        );
         assert!(has_link(&report, "CNAME www.state.gov. \u{2192}"));
-        // The target's A records carry no RRSIG, so nothing vouches for them.
-        // (This harness serves no DS records, so the reason reported is the
-        // one for state.gov; live, it names cloudfront.net.)
+        // The target's A records carry no RRSIG, and net's opt-out NSEC3 shows
+        // that cloudfront.net may be an unsigned delegation.
         assert!(!has_link(&report, "A RRSIG verified"));
+        assert!(has_link(&report, "opt-out NSEC3 by net. covers it"));
         assert!(
-            matches!(report.status, ChainStatus::Insecure(_)),
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("cloudfront.net. is an unsigned delegation")),
             "{:?}",
             report.status
         );
@@ -3235,14 +3485,13 @@ mod tests {
     fn negative_answer_at_the_end_of_a_cname_chain_is_proven() {
         let answer = full_message(CNAME_NODATA);
         let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
-        let report = validate_with(
+        let report = validate_pinned(
             &answer,
             "www.sidn.nl",
             RecordType::Unknown(29),
-            FIXED_WILDCARD_NOW,
             &fetch,
-        )
-        .unwrap();
+            &["sidn.nl."],
+        );
         assert!(has_link(&report, "CNAME www.sidn.nl. \u{2192} sidn.nl."));
         // The denial is for the CNAME's target, not for the name queried.
         assert!(
@@ -3250,7 +3499,7 @@ mod tests {
             "{:?}",
             report.links.iter().map(|l| &l.detail).collect::<Vec<_>>()
         );
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     fn cloudflare_chain(name: &str, rtype: RecordType) -> Result<DnsMessage, DnsError> {
@@ -3289,8 +3538,12 @@ mod tests {
             &cloudflare_chain,
         )
         .unwrap();
-        assert_ne!(other.status, ChainStatus::Secure);
-        assert!(!has_link(&other, "RRSIG verified"));
+        assert!(
+            matches!(other.status, ChainStatus::Bogus(_)),
+            "{:?}",
+            other.status
+        );
+        assert!(!has_link(&other, "A RRSIG verified"));
     }
 
     #[test]
@@ -3367,7 +3620,7 @@ mod tests {
             &fetch,
         )
         .unwrap();
-        assert!(matches!(outcome, DenialOutcome::Unsigned(_)));
+        assert!(matches!(outcome, DenialOutcome::Unsigned));
     }
 
     #[test]
@@ -3485,7 +3738,13 @@ mod tests {
 
     fn validate_dname(answer: &DnsMessage, qname: &str) -> ValidationReport {
         let fetch = zone_keys(DNAME_ZONES);
-        validate_with(answer, qname, RecordType::A, FIXED_WILDCARD_NOW, &fetch).unwrap()
+        validate_pinned(
+            answer,
+            qname,
+            RecordType::A,
+            &fetch,
+            &["sidnlabs.nl.", "example.nl."],
+        )
     }
 
     #[test]
@@ -3501,7 +3760,7 @@ mod tests {
         ));
         assert!(has_link(&report, "A RRSIG verified"));
         assert!(report.links.iter().all(|l| l.ok));
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     #[test]
@@ -3522,7 +3781,7 @@ mod tests {
             "{:?}",
             report.links.iter().map(|l| &l.detail).collect::<Vec<_>>()
         );
-        assert!(!matches!(report.status, ChainStatus::Bogus(_)));
+        assert_eq!(report.status, ChainStatus::Secure);
     }
 
     /// The synthesized CNAME is unsigned, so the only thing that makes it
@@ -3554,7 +3813,7 @@ mod tests {
             !matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == RecordType::DNAME)
         });
         let report = validate_dname(&answer, "www.dname.sidnlabs.nl");
-        assert!(matches!(report.status, ChainStatus::Insecure(_)));
+        assert!(matches!(report.status, ChainStatus::Bogus(_)));
         assert!(!has_link(&report, "synthesized from DNAME"));
         assert!(!has_link(&report, "A RRSIG verified"));
     }
@@ -3595,6 +3854,420 @@ mod tests {
         assert_eq!(
             canonical_rdata(&rr).unwrap(),
             encode_name("target.example.net.").unwrap()
+        );
+    }
+
+    // === Unsigned delegations (captured live from 1.1.1.1 on 2026-10-12,
+    // inside the FIXED_WILDCARD_NOW signature window). ===
+    // DS_TEST_DNSSEC_TOOLS is the DS query for test.dnssec-tools.org: NODATA,
+    // with dnssec-tools.org's NSEC showing NS and no DS at that name.
+    // DS_CLOUDFRONT_NET is the DS query for cloudfront.net: net's opt-out
+    // NSEC3 covers the name.
+    const DS_TEST_DNSSEC_TOOLS: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x04, 0x74, 0x65,
+        0x73, 0x74, 0x0C, 0x64, 0x6E, 0x73, 0x73, 0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C, 0x73,
+        0x03, 0x6F, 0x72, 0x67, 0x00, 0x00, 0x2B, 0x00, 0x01, 0xC0, 0x11, 0x00, 0x06, 0x00, 0x01,
+        0x00, 0x00, 0x01, 0x2C, 0x00, 0x22, 0x03, 0x6E, 0x73, 0x31, 0xC0, 0x11, 0x05, 0x61, 0x64,
+        0x6D, 0x69, 0x6E, 0xC0, 0x11, 0x78, 0xC3, 0xD9, 0x09, 0x00, 0x00, 0x2A, 0x30, 0x00, 0x00,
+        0x0E, 0x10, 0x00, 0x1B, 0xAF, 0x80, 0x00, 0x00, 0x2A, 0x30, 0xC0, 0x11, 0x00, 0x2E, 0x00,
+        0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x64, 0x00, 0x06, 0x0D, 0x02, 0x00, 0x00, 0x01, 0x2C,
+        0x6A, 0xDC, 0x9C, 0xAD, 0x6A, 0xCA, 0x12, 0x95, 0xF9, 0xFB, 0x0C, 0x64, 0x6E, 0x73, 0x73,
+        0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C, 0x73, 0x03, 0x6F, 0x72, 0x67, 0x00, 0x7E, 0xB9,
+        0x40, 0x98, 0xD4, 0xCB, 0x5F, 0xDB, 0xF4, 0xD1, 0xC9, 0x4B, 0xD1, 0x7A, 0x51, 0x51, 0x59,
+        0xC2, 0xCC, 0x1F, 0xA9, 0xEE, 0xE6, 0x0E, 0xDE, 0x04, 0xF7, 0xE1, 0x6A, 0x46, 0x84, 0xBA,
+        0xD9, 0xBD, 0x3C, 0x57, 0xE6, 0x0A, 0xD8, 0x09, 0xE7, 0x90, 0x30, 0xA2, 0x8F, 0xBC, 0xDF,
+        0xE9, 0x1B, 0x12, 0x86, 0xEA, 0x6C, 0x6D, 0x33, 0x2F, 0xBF, 0xDF, 0xA5, 0x64, 0x2D, 0x0D,
+        0x77, 0x32, 0xC0, 0x0C, 0x00, 0x2F, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x1E, 0x03,
+        0x77, 0x77, 0x77, 0x0C, 0x64, 0x6E, 0x73, 0x73, 0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C,
+        0x73, 0x03, 0x6F, 0x72, 0x67, 0x00, 0x00, 0x06, 0x20, 0x00, 0x00, 0x00, 0x00, 0x03, 0xC0,
+        0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x64, 0x00, 0x2F, 0x0D, 0x03,
+        0x00, 0x00, 0x01, 0x2C, 0x6A, 0xDC, 0x80, 0x8D, 0x6A, 0xC9, 0xF6, 0x75, 0xF9, 0xFB, 0x0C,
+        0x64, 0x6E, 0x73, 0x73, 0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C, 0x73, 0x03, 0x6F, 0x72,
+        0x67, 0x00, 0x01, 0xEF, 0xA2, 0x48, 0xD4, 0x25, 0x32, 0x87, 0xD1, 0xFE, 0xF5, 0x2B, 0x04,
+        0xD9, 0xBA, 0x74, 0xC2, 0x97, 0x52, 0xB7, 0x4D, 0xF7, 0xC4, 0x84, 0x63, 0xDC, 0xA4, 0xF5,
+        0x9D, 0x9F, 0xFA, 0xA7, 0x83, 0xE7, 0x62, 0xEA, 0x4A, 0x37, 0x44, 0x49, 0x9E, 0x9F, 0xD5,
+        0x9A, 0x11, 0x6A, 0x69, 0xC3, 0x5E, 0x2B, 0x9F, 0xAF, 0x3F, 0x91, 0x1F, 0x3D, 0xC2, 0x41,
+        0x04, 0x78, 0x86, 0x69, 0x9F, 0xC6, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00,
+    ];
+
+    const DNSSEC_TOOLS_DNSKEY: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x64, 0x6E,
+        0x73, 0x73, 0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C, 0x73, 0x03, 0x6F, 0x72, 0x67, 0x00,
+        0x00, 0x30, 0x00, 0x01, 0xC0, 0x0C, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00,
+        0x44, 0x01, 0x00, 0x03, 0x0D, 0xFA, 0x8D, 0xBC, 0x41, 0xB6, 0xB6, 0xFE, 0xC9, 0x1B, 0x88,
+        0xFF, 0x09, 0x2B, 0x7E, 0x39, 0x0D, 0x72, 0x7F, 0x79, 0x09, 0x0C, 0x59, 0x13, 0xB3, 0x06,
+        0x33, 0x53, 0x4B, 0x3A, 0x0B, 0xF9, 0x3E, 0x3E, 0x3B, 0xBE, 0x10, 0x81, 0x21, 0xC5, 0x10,
+        0x8B, 0x08, 0xA6, 0x8F, 0xAA, 0x4C, 0xFB, 0xEA, 0xCD, 0x0C, 0x60, 0x18, 0x8A, 0x19, 0x68,
+        0x3C, 0xC6, 0x82, 0x1A, 0x8E, 0xF7, 0x69, 0x5F, 0xDF, 0xC0, 0x0C, 0x00, 0x30, 0x00, 0x01,
+        0x00, 0x00, 0x0E, 0x10, 0x00, 0x44, 0x01, 0x01, 0x03, 0x0D, 0x62, 0x9D, 0x7E, 0x85, 0x5D,
+        0x90, 0x0B, 0xBD, 0x9A, 0x5F, 0x64, 0xC5, 0x62, 0xB2, 0xD1, 0xA1, 0x27, 0xB1, 0xF1, 0x01,
+        0x6D, 0x2E, 0x47, 0x12, 0x11, 0xF3, 0xA0, 0xBA, 0xA2, 0x0C, 0xA6, 0xC7, 0x6A, 0xAF, 0x70,
+        0xA3, 0xB8, 0xE0, 0x89, 0xA8, 0x75, 0x7F, 0xAF, 0x95, 0xB4, 0x5C, 0x35, 0xEF, 0x8A, 0x7A,
+        0x4A, 0x3F, 0x76, 0x25, 0x48, 0xD4, 0x81, 0x4E, 0x23, 0x83, 0x11, 0x75, 0x64, 0x01, 0xC0,
+        0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x64, 0x00, 0x30, 0x0D, 0x02,
+        0x00, 0x00, 0x0E, 0x10, 0x6A, 0xDC, 0x9C, 0xAD, 0x6A, 0xCA, 0x12, 0x95, 0x25, 0xA6, 0x0C,
+        0x64, 0x6E, 0x73, 0x73, 0x65, 0x63, 0x2D, 0x74, 0x6F, 0x6F, 0x6C, 0x73, 0x03, 0x6F, 0x72,
+        0x67, 0x00, 0xF8, 0xF5, 0xD7, 0x79, 0x14, 0xD1, 0x2A, 0x34, 0x7B, 0x1A, 0x84, 0x2B, 0xF6,
+        0x3E, 0x81, 0x3C, 0x66, 0x1D, 0xAD, 0x9D, 0x0F, 0xE6, 0xF2, 0x24, 0x91, 0xC2, 0xF5, 0x98,
+        0x0E, 0xF1, 0x30, 0x6A, 0xB6, 0xA8, 0x4C, 0x9A, 0x77, 0xDB, 0x12, 0x65, 0x09, 0x79, 0x5F,
+        0xEF, 0x33, 0x04, 0x62, 0x0C, 0x2B, 0xB9, 0x42, 0xEF, 0x78, 0xAB, 0x83, 0xFF, 0x30, 0x5F,
+        0x4F, 0x8C, 0x15, 0xB9, 0x6F, 0x33, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00,
+    ];
+
+    const DS_CLOUDFRONT_NET: &[u8] = &[
+        0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x0A, 0x63, 0x6C,
+        0x6F, 0x75, 0x64, 0x66, 0x72, 0x6F, 0x6E, 0x74, 0x03, 0x6E, 0x65, 0x74, 0x00, 0x00, 0x2B,
+        0x00, 0x01, 0xC0, 0x17, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x3D, 0x01,
+        0x61, 0x0C, 0x67, 0x74, 0x6C, 0x64, 0x2D, 0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x73, 0xC0,
+        0x17, 0x05, 0x6E, 0x73, 0x74, 0x6C, 0x64, 0x0C, 0x76, 0x65, 0x72, 0x69, 0x73, 0x69, 0x67,
+        0x6E, 0x2D, 0x67, 0x72, 0x73, 0x03, 0x63, 0x6F, 0x6D, 0x00, 0x6A, 0xCD, 0x7B, 0x8C, 0x00,
+        0x00, 0x07, 0x08, 0x00, 0x00, 0x03, 0x84, 0x00, 0x09, 0x3A, 0x80, 0x00, 0x00, 0x03, 0x84,
+        0xC0, 0x17, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x57, 0x00, 0x06, 0x0D,
+        0x01, 0x00, 0x00, 0x03, 0x84, 0x6A, 0xD6, 0xB6, 0x0C, 0x6A, 0xCD, 0x6B, 0x24, 0x1C, 0x68,
+        0x03, 0x6E, 0x65, 0x74, 0x00, 0x25, 0x46, 0xD3, 0xDE, 0x05, 0xA1, 0xD3, 0x35, 0x4F, 0x30,
+        0x6F, 0x30, 0xAC, 0x8D, 0xE9, 0xD4, 0x5F, 0x7E, 0x75, 0x6F, 0x2D, 0x66, 0x38, 0x61, 0x01,
+        0x59, 0x29, 0xE5, 0x10, 0x73, 0x43, 0x6D, 0xA4, 0xC8, 0xE4, 0xFF, 0x35, 0xA7, 0xE3, 0x8D,
+        0x4B, 0x72, 0x85, 0xDC, 0x09, 0x36, 0x60, 0x8E, 0x5D, 0xB1, 0xD7, 0x83, 0x50, 0xF5, 0xB7,
+        0x24, 0x8A, 0x3D, 0x47, 0x16, 0x7D, 0x1F, 0x57, 0xAD, 0x20, 0x66, 0x61, 0x64, 0x66, 0x75,
+        0x32, 0x35, 0x32, 0x6A, 0x6A, 0x6C, 0x36, 0x64, 0x6F, 0x6A, 0x6E, 0x33, 0x36, 0x76, 0x70,
+        0x32, 0x63, 0x73, 0x71, 0x61, 0x6D, 0x63, 0x64, 0x37, 0x72, 0x39, 0x38, 0xC0, 0x17, 0x00,
+        0x32, 0x00, 0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x22, 0x01, 0x01, 0x00, 0x00, 0x00, 0x14,
+        0x7A, 0x9B, 0x13, 0xD2, 0x15, 0x44, 0x04, 0x31, 0x2C, 0x76, 0x4C, 0xED, 0x18, 0xD9, 0x50,
+        0x57, 0x46, 0x7C, 0x4E, 0x83, 0x00, 0x06, 0x20, 0x00, 0x00, 0x00, 0x00, 0x12, 0xC0, 0xCC,
+        0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x57, 0x00, 0x32, 0x0D, 0x02, 0x00,
+        0x00, 0x03, 0x84, 0x6A, 0xD4, 0x88, 0x3A, 0x6A, 0xCB, 0x3D, 0x52, 0x1C, 0x68, 0x03, 0x6E,
+        0x65, 0x74, 0x00, 0x59, 0x7F, 0xD3, 0xC0, 0x49, 0x58, 0x31, 0x99, 0x0B, 0x3A, 0xE1, 0x4D,
+        0xDA, 0x11, 0x5E, 0xDF, 0x4D, 0x27, 0x2A, 0xA6, 0x33, 0x32, 0xB1, 0xF2, 0x33, 0x39, 0x83,
+        0x3F, 0xBC, 0xFB, 0x08, 0x5A, 0x76, 0xEB, 0xA6, 0xEC, 0x80, 0xC3, 0x95, 0x50, 0x55, 0x57,
+        0x48, 0x5C, 0x05, 0xD7, 0xF2, 0xAF, 0x42, 0x61, 0x14, 0xBF, 0xF0, 0xE8, 0xBF, 0x00, 0xEB,
+        0x5F, 0xE3, 0xFC, 0x89, 0x71, 0x5D, 0x80, 0x20, 0x61, 0x31, 0x72, 0x74, 0x39, 0x38, 0x62,
+        0x73, 0x35, 0x71, 0x67, 0x63, 0x39, 0x6E, 0x66, 0x69, 0x35, 0x31, 0x73, 0x39, 0x68, 0x63,
+        0x69, 0x34, 0x37, 0x75, 0x6C, 0x6A, 0x67, 0x36, 0x6A, 0x68, 0xC0, 0x17, 0x00, 0x32, 0x00,
+        0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x23, 0x01, 0x01, 0x00, 0x00, 0x00, 0x14, 0x50, 0x77,
+        0xDA, 0xDF, 0x30, 0xF5, 0x71, 0x0B, 0x9D, 0x69, 0x51, 0x85, 0xC8, 0xCD, 0xC1, 0xF0, 0xFB,
+        0xDC, 0xA1, 0xBB, 0x00, 0x07, 0x22, 0x00, 0x00, 0x00, 0x00, 0x02, 0x90, 0xC1, 0x7E, 0x00,
+        0x2E, 0x00, 0x01, 0x00, 0x00, 0x01, 0x89, 0x00, 0x57, 0x00, 0x32, 0x0D, 0x02, 0x00, 0x00,
+        0x03, 0x84, 0x6A, 0xD2, 0xF0, 0xF7, 0x6A, 0xC9, 0xA6, 0x0F, 0x1C, 0x68, 0x03, 0x6E, 0x65,
+        0x74, 0x00, 0xAC, 0x05, 0x75, 0x62, 0x3F, 0xA7, 0x1F, 0x50, 0xC6, 0x28, 0xDD, 0xA1, 0x41,
+        0xD4, 0xA7, 0x95, 0x5A, 0xB4, 0xA7, 0x61, 0x43, 0x06, 0xCC, 0xE7, 0x46, 0xB4, 0xB3, 0xC5,
+        0x05, 0xF7, 0x46, 0x20, 0xD4, 0xCB, 0xA6, 0x65, 0x62, 0xD7, 0xE5, 0x25, 0x9B, 0xB3, 0xB3,
+        0x2C, 0x74, 0xE4, 0x7A, 0x35, 0x13, 0x14, 0xEC, 0xE9, 0x3C, 0x0E, 0x6E, 0x86, 0xC3, 0xA5,
+        0x46, 0xDE, 0x25, 0x6C, 0xFB, 0xF5, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00,
+        0x00, 0x00,
+    ];
+
+    const NET_DNSKEY: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x03, 0x6E, 0x65,
+        0x74, 0x00, 0x00, 0x30, 0x00, 0x01, 0xC0, 0x0C, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 0x0C,
+        0x0A, 0x00, 0x44, 0x01, 0x00, 0x03, 0x0D, 0x97, 0xBA, 0xE0, 0x8D, 0x1F, 0xCE, 0xB4, 0x0D,
+        0x18, 0xD0, 0x33, 0xDD, 0x41, 0x60, 0x08, 0xBB, 0xB5, 0x42, 0x31, 0xB4, 0xE6, 0x8B, 0x37,
+        0xCD, 0x40, 0x64, 0xF8, 0x24, 0x25, 0x38, 0x24, 0xAC, 0xB5, 0x86, 0x1E, 0xEA, 0xBC, 0xB1,
+        0xD6, 0x64, 0x72, 0x22, 0x72, 0xCD, 0x01, 0x2A, 0x70, 0x37, 0x99, 0x2E, 0xE2, 0x6F, 0xC1,
+        0x1D, 0xA6, 0xD0, 0xE0, 0xEA, 0xD5, 0xA4, 0x5D, 0xCB, 0xF7, 0xEF, 0xC0, 0x0C, 0x00, 0x30,
+        0x00, 0x01, 0x00, 0x00, 0x0C, 0x0A, 0x00, 0x44, 0x01, 0x00, 0x03, 0x0D, 0xF9, 0x23, 0xA4,
+        0x20, 0x78, 0x82, 0xEE, 0x28, 0x67, 0xEF, 0x30, 0xED, 0x05, 0x6D, 0x8E, 0x8D, 0x53, 0xA0,
+        0x9E, 0xFB, 0xFE, 0xCB, 0x8C, 0xEB, 0x6E, 0x19, 0x1C, 0x6E, 0xB9, 0x93, 0x29, 0xB5, 0xEE,
+        0x32, 0x51, 0x41, 0xB0, 0x37, 0x10, 0xF2, 0x0E, 0xEE, 0x79, 0x78, 0xBD, 0xEB, 0x7A, 0xBE,
+        0x8D, 0xD4, 0xB0, 0xB8, 0x6C, 0x55, 0x90, 0x5E, 0x9B, 0xB9, 0x2D, 0x86, 0xCC, 0x5C, 0x5B,
+        0x7B, 0xC0, 0x0C, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00, 0x0C, 0x0A, 0x00, 0x44, 0x01, 0x01,
+        0x03, 0x0D, 0x1E, 0x20, 0x68, 0x1A, 0x9C, 0xC3, 0x44, 0x08, 0x2B, 0x0E, 0x65, 0x17, 0x5D,
+        0x34, 0xA7, 0x97, 0xB8, 0xC2, 0x5F, 0xA1, 0xF1, 0xE5, 0xBC, 0xE4, 0x53, 0x68, 0xD2, 0xC4,
+        0xC6, 0xD5, 0x23, 0x4D, 0x72, 0x4B, 0xED, 0x77, 0x13, 0x23, 0xA0, 0x86, 0x70, 0xA2, 0x74,
+        0x15, 0xD4, 0xD1, 0xB1, 0xF6, 0x82, 0x2D, 0xB0, 0xF4, 0x68, 0x58, 0x19, 0xA7, 0x29, 0x53,
+        0xA0, 0xAB, 0xB7, 0x0A, 0x05, 0x36, 0xC0, 0x0C, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0C,
+        0x0A, 0x00, 0x57, 0x00, 0x30, 0x0D, 0x01, 0x00, 0x01, 0x51, 0x80, 0x6A, 0xD6, 0x24, 0xDB,
+        0x6A, 0xC2, 0x5D, 0x2F, 0x91, 0xD3, 0x03, 0x6E, 0x65, 0x74, 0x00, 0xBD, 0xCE, 0x19, 0xCC,
+        0x10, 0xCA, 0x2D, 0x66, 0x20, 0x7A, 0x77, 0x9B, 0x9F, 0x4A, 0x9F, 0x7C, 0x7B, 0x87, 0x3C,
+        0xEF, 0xD6, 0x68, 0x28, 0x12, 0xAD, 0x5D, 0x2F, 0x78, 0xCE, 0x4F, 0xEE, 0xA5, 0x8A, 0xF6,
+        0x51, 0x6C, 0xE7, 0x12, 0x21, 0x09, 0x2B, 0x1F, 0x98, 0xC4, 0x23, 0xD1, 0xD6, 0xB2, 0x79,
+        0x55, 0xD8, 0xFF, 0x5D, 0x00, 0xA2, 0xDA, 0x74, 0xDA, 0x49, 0xE9, 0xA1, 0xBB, 0x6B, 0x95,
+        0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    ];
+
+    /// Validate with `zones` taken as already verified to the root, so a test
+    /// that serves only the DNSKEY sets it needs ends at those zones as Secure.
+    fn validate_pinned(
+        answer: &DnsMessage,
+        qname: &str,
+        qtype: RecordType,
+        fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+        zones: &[&str],
+    ) -> ValidationReport {
+        let mut trusted = zones.iter().map(|z| z.to_string()).collect();
+        validate_answer(
+            answer,
+            qname,
+            qtype,
+            FIXED_WILDCARD_NOW,
+            fetch,
+            &mut trusted,
+        )
+        .unwrap()
+    }
+
+    /// A response holding one DS record for `name`. Nothing checks its digest
+    /// in these tests: a DS only tells the walk that `name` is a signed
+    /// delegation and to look further down.
+    fn ds_present(name: &str) -> DnsMessage {
+        let mut msg = DnsMessage::parse(&[0u8; 12]).unwrap();
+        msg.answers.push(ResourceRecord {
+            name: name.to_string(),
+            rtype: RecordType::DS,
+            rclass: RecordClass::IN,
+            ttl: 300,
+            rdata: RData::DS {
+                key_tag: 1,
+                algorithm: 13,
+                digest_type: 2,
+                digest: vec![0; 32],
+            },
+            raw_rdata: Vec::new(),
+        });
+        msg
+    }
+
+    /// Serve captured responses by (name, type), a DS for every name in
+    /// `signed`, and an empty response for anything else.
+    fn served(
+        responses: &'static [(&'static str, RecordType, &'static [u8])],
+        signed: &'static [&'static str],
+    ) -> impl Fn(&str, RecordType) -> Result<DnsMessage, DnsError> {
+        move |name: &str, rtype: RecordType| {
+            if let Some((_, _, wire)) = responses.iter().find(|(n, t, _)| *n == name && *t == rtype)
+            {
+                return DnsMessage::parse(wire);
+            }
+            if rtype == RecordType::DS && signed.contains(&name) {
+                return Ok(ds_present(name));
+            }
+            DnsMessage::parse(&[0u8; 12])
+        }
+    }
+
+    const UNSIGNED_CHILD: &[(&str, RecordType, &[u8])] = &[
+        (
+            "test.dnssec-tools.org.",
+            RecordType::DS,
+            DS_TEST_DNSSEC_TOOLS,
+        ),
+        ("dnssec-tools.org.", RecordType::DNSKEY, DNSSEC_TOOLS_DNSKEY),
+    ];
+
+    fn classify(
+        name: &str,
+        fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+        trusted: &[&str],
+    ) -> (ChainStatus, Vec<LinkReport>) {
+        let mut links = Vec::new();
+        let mut trusted = trusted.iter().map(|z| z.to_string()).collect();
+        let status =
+            classify_unsigned(name, FIXED_WILDCARD_NOW, fetch, &mut links, &mut trusted).unwrap();
+        (status, links)
+    }
+
+    #[test]
+    fn unsigned_delegation_proven_by_nsec_is_insecure() {
+        let fetch = served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."]);
+        let (status, links) =
+            classify("www.test.dnssec-tools.org.", &fetch, &["dnssec-tools.org."]);
+        assert!(
+            matches!(&status, ChainStatus::Insecure(why) if why.contains("test.dnssec-tools.org. is an unsigned delegation")),
+            "{:?}",
+            status
+        );
+        assert!(links.iter().any(|l| l.ok
+            && l.detail
+                .contains("NSEC by dnssec-tools.org. has NS and no DS")));
+    }
+
+    /// The downgrade this exists to stop: the name sits in a signed zone and
+    /// its signatures are simply missing.
+    #[test]
+    fn unsigned_data_in_a_signed_zone_is_bogus() {
+        // Every cut down to the name has a DS, and nothing says otherwise.
+        let fetch = served(&[], &["nl.", "sidn.nl."]);
+        let (status, _) = classify("www.sidn.nl.", &fetch, &[]);
+        assert!(
+            matches!(&status, ChainStatus::Bogus(why) if why.contains("www.sidn.nl.")),
+            "{:?}",
+            status
+        );
+    }
+
+    /// "There is no DS" from a resolver is not evidence. Without the parent's
+    /// signature on it, anyone can say so.
+    #[test]
+    fn unsigned_delegation_claim_without_a_valid_proof_is_bogus() {
+        let stripped = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            let mut msg = served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."])(name, rtype)?;
+            msg.authority.retain(|rr| rr.rtype != RecordType::RRSIG);
+            Ok(msg)
+        };
+        let (status, links) = classify(
+            "www.test.dnssec-tools.org.",
+            &stripped,
+            &["dnssec-tools.org."],
+        );
+        assert!(matches!(status, ChainStatus::Bogus(_)), "{:?}", status);
+        assert!(links.iter().any(|l| !l.ok));
+
+        // The genuine proof for test.dnssec-tools.org, offered for a sibling
+        // name it does not cover.
+        let moved = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            match (name, rtype) {
+                ("other.dnssec-tools.org.", RecordType::DS) => {
+                    DnsMessage::parse(DS_TEST_DNSSEC_TOOLS)
+                }
+                ("test.dnssec-tools.org.", RecordType::DS) => DnsMessage::parse(&[0u8; 12]),
+                _ => served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."])(name, rtype),
+            }
+        };
+        let (status, _) = classify(
+            "www.other.dnssec-tools.org.",
+            &moved,
+            &["dnssec-tools.org."],
+        );
+        assert!(matches!(status, ChainStatus::Bogus(_)), "{:?}", status);
+    }
+
+    /// The proof is only as good as the zone that signed it.
+    #[test]
+    fn unsigned_delegation_proof_needs_its_signer_verified() {
+        // dnssec-tools.org is not pinned here, so its own chain is walked. The
+        // DS this harness serves for it matches none of its keys.
+        let fetch = served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."]);
+        let (status, links) = classify("www.test.dnssec-tools.org.", &fetch, &[]);
+        assert!(
+            matches!(&status, ChainStatus::Bogus(why) if why.contains("digest mismatch")),
+            "{:?}",
+            status
+        );
+        // The proof itself was fine; it is the signer that failed.
+        assert!(links
+            .iter()
+            .any(|l| l.ok && l.detail.contains("has NS and no DS")));
+    }
+
+    #[test]
+    fn zone_with_keys_but_no_ds_needs_proof_to_be_insecure() {
+        // sidn.nl's real DNSKEY set, and a DS response with nothing in it.
+        let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
+        let report = chain_to_root(
+            "sidn.nl.".to_string(),
+            FIXED_WILDCARD_NOW,
+            &fetch,
+            Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Bogus(why) if why.contains("no DS at parent")),
+            "{:?}",
+            report.status
+        );
+    }
+
+    fn nsec_with(owner: &str, next: &str, types: &[RecordType]) -> ResourceRecord {
+        let mut rr = nsec(owner, next);
+        if let RData::NSEC { type_bitmaps, .. } = &mut rr.rdata {
+            *type_bitmaps = types.to_vec();
+        }
+        rr
+    }
+
+    #[test]
+    fn delegation_proof_reads_the_type_bitmap() {
+        let proof =
+            |rr: &ResourceRecord, name: &str| delegation_proof(&[rr], &[], name, "example.com.");
+        let at = |types: &[RecordType]| nsec_with("sub.example.com.", "t.example.com.", types);
+
+        // NS without DS or SOA: the parent side of an unsigned delegation.
+        assert!(matches!(
+            proof(&at(&[RecordType::NS]), "sub.example.com."),
+            Delegation::Unsigned { .. }
+        ));
+        // A DS bit contradicts the missing DS.
+        assert!(matches!(
+            proof(&at(&[RecordType::NS, RecordType::DS]), "sub.example.com."),
+            Delegation::Unproven(_)
+        ));
+        // An ordinary name, and a zone apex seen from the child side.
+        assert!(matches!(
+            proof(&at(&[RecordType::A]), "sub.example.com."),
+            Delegation::NotACut
+        ));
+        assert!(matches!(
+            proof(&at(&[RecordType::NS, RecordType::SOA]), "sub.example.com."),
+            Delegation::NotACut
+        ));
+
+        // Covered by an NSEC whose next name lies below it: an empty
+        // non-terminal, which exists and is not a delegation.
+        let ent = nsec("a.example.com.", "x.sub.example.com.");
+        assert!(matches!(
+            proof(&ent, "sub.example.com."),
+            Delegation::NotACut
+        ));
+        // Covered with nothing below it: the name does not exist at all.
+        let gap = nsec("a.example.com.", "t.example.com.");
+        assert!(matches!(
+            proof(&gap, "sub.example.com."),
+            Delegation::Unproven(why) if why.contains("does not exist")
+        ));
+        // Nothing relevant.
+        assert!(matches!(
+            delegation_proof(&[], &[], "sub.example.com.", "example.com."),
+            Delegation::Unproven(_)
+        ));
+    }
+
+    #[test]
+    fn delegation_proof_reads_a_matching_nsec3() {
+        use crate::protocol::record::base32_encode_hex;
+        let salt = vec![0xAB, 0xCD];
+        let hash = nsec3_hash("sub.example.com.", 1, &salt).unwrap();
+        let nsec3 = |types: &[RecordType]| ResourceRecord {
+            name: format!("{}.example.com.", base32_encode_hex(&hash)),
+            rtype: RecordType::NSEC3,
+            rclass: RecordClass::IN,
+            ttl: 300,
+            rdata: RData::NSEC3 {
+                algorithm: 1,
+                flags: 0,
+                iterations: 1,
+                salt: salt.clone(),
+                next_hashed: vec![0xFF; 20],
+                type_bitmaps: types.to_vec(),
+            },
+            raw_rdata: Vec::new(),
+        };
+        let unsigned = nsec3(&[RecordType::NS]);
+        assert!(matches!(
+            delegation_proof(&[], &[&unsigned], "sub.example.com.", "example.com."),
+            Delegation::Unsigned { .. }
+        ));
+        let signed = nsec3(&[RecordType::NS, RecordType::DS]);
+        assert!(matches!(
+            delegation_proof(&[], &[&signed], "sub.example.com.", "example.com."),
+            Delegation::Unproven(_)
+        ));
+    }
+
+    #[test]
+    fn servfail_is_reported_as_a_resolver_failure() {
+        // Header only, QR set, RCODE 2.
+        let answer = DnsMessage::parse(&[0x12, 0x34, 0x81, 0x82, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let no_fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            panic!("unexpected fetch: {} {}", name, rtype)
+        };
+        let report =
+            validate_with(&answer, "example.com", RecordType::A, FIXED_NOW, &no_fetch).unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("SERVFAIL")),
+            "{:?}",
+            report.status
         );
     }
 }

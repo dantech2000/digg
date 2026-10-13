@@ -13,6 +13,8 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
 
 - **`+validate` follows the answer from the name you asked for.** Earlier versions validated only the last RRset in the answer and ignored any CNAME in front of it. Now every CNAME in the chain must be signed, and every zone that signed a step is validated to the root. A name whose CNAME points into an unsigned zone (a CDN, for example) now reports `INSECURE` where it could report `SECURE`.
 - **`+validate` checks who signed.** A signature counts only if it comes from the zone that holds the record. Anything else is `BOGUS` (exit code `2`).
+- **Missing signatures are `BOGUS`, not `INSECURE`.** An unsigned answer is `INSECURE` only when a signed parent zone proves that the delegation is unsigned. Earlier versions reported `INSECURE` for any answer without signatures, so an attacker could hide a forgery by deleting them. A resolver that strips DNSSEC records now makes every signed name `BOGUS`; point `digg` at one that returns them (`@1.1.1.1`, `@8.8.8.8`, `@9.9.9.9`).
+- **`SERVFAIL` is reported as a resolver failure.** It shows `INSECURE (resolver answered SERVFAIL; ...)`. Use `+cd` to get the data a validating resolver refused.
 - **Wildcard answers need their proof.** An answer synthesized from a wildcard is `SECURE` only with the `NSEC` / `NSEC3` proof that the name itself does not exist. Without it the answer is `BOGUS`.
 
 **Added**
