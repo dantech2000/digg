@@ -64,10 +64,27 @@ pub fn resolve_doh_url(provider_or_url: &str) -> String {
     format!("https://{}/dns-query", provider_or_url)
 }
 
+/// One HTTP agent for the whole run, so its connection pool is shared.
+///
+/// `ureq::post` builds a new agent for every call, and with it a new TCP
+/// connection and TLS handshake. +validate follows the answer with several
+/// lookups; with a shared agent the ones that run after an earlier request
+/// has finished reuse its connection. Lookups sent at the same moment still
+/// open one connection each, because HTTP/1.1 carries one request at a time.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .max_idle_connections_per_host(8)
+            .build()
+    })
+}
+
 pub fn send_doh_query(url: &str, query: &[u8], timeout: Duration) -> Result<QueryResult, DnsError> {
     let start = Instant::now();
 
-    let response = ureq::post(url)
+    let response = agent()
+        .post(url)
         .set("Content-Type", "application/dns-message")
         .set("Accept", "application/dns-message")
         .timeout(timeout)
