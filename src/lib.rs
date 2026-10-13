@@ -192,6 +192,14 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
     let server = resolve_server()?;
     let mut exit_code = 0;
 
+    if opts.validate && (opts.json || opts.yaml || opts.tsv) {
+        // The structured formats have no place for the validation report, and
+        // a script that asked for one must not take silence for SECURE.
+        eprintln!(
+            "warning: +validate is not run with +json, +yaml or +tsv; no validation was done"
+        );
+    }
+
     for (i, (qtype, name)) in opts.queries.iter().enumerate() {
         if i > 0 && !opts.tsv {
             println!();

@@ -236,6 +236,28 @@ fn nostats_hides_the_status_footer() {
 }
 
 #[test]
+fn validate_with_a_structured_format_warns_that_it_did_not_run() {
+    // The structured formats carry no validation report. Exit 0 with no
+    // warning would read as "validated fine" to a script.
+    static ADDRS: [[u8; 4]; 1] = [[1, 2, 3, 4]];
+    for format in ["+json", "+yaml", "+tsv"] {
+        let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+        let output = run_digg(server.port, &[format, "+validate"]);
+        assert!(
+            stderr(&output).contains("warning: +validate is not run with"),
+            "{}: stderr was {:?}",
+            format,
+            stderr(&output)
+        );
+        assert!(!stdout(&output).contains("VALIDATION"));
+    }
+    // Without +validate there is nothing to warn about.
+    let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
+    let output = run_digg(server.port, &["+tsv"]);
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn tsv_output_is_stable_tab_separated_lines() {
     static ADDRS: [[u8; 4]; 2] = [[1, 2, 3, 4], [5, 6, 7, 8]];
     let server = MockDns::start(Behavior::Answer(&ADDRS), Behavior::Silent);
