@@ -145,11 +145,58 @@ pub fn validate(
             cd,
             Some(&edns),
         )?;
-        let result = transport::send_query_with_retries(server, port, &query, false, timeout, 2)?
-            .verify_id(id)?;
-        Ok(result.message)
+        complete_response(name, rtype, Duration::from_millis(150), || {
+            let result =
+                transport::send_query_with_retries(server, port, &query, false, timeout, 2)?
+                    .verify_id(id)?;
+            Ok(result.message)
+        })
     };
     validate_with(answer, qname, qtype, now, &fetch)
+}
+
+/// How many times to ask again when a response is unusable.
+const INCOMPLETE_RETRIES: u32 = 2;
+
+/// Run `send` until it yields a response that can carry DNSSEC data.
+///
+/// Two kinds of response cannot, and neither is evidence about the zone:
+///
+/// - Truncated. The transport already retries a truncated UDP response over
+///   TCP, so a TC bit that reaches here was set on the TCP response itself.
+/// - Without an EDNS OPT record. Every query here sets the DO bit, and a
+///   resolver that understood it answers with OPT. One without it is a
+///   resolver that dropped the request's EDNS, and its DNSSEC records too.
+///
+/// Some forwarders return both now and then, with an empty answer. Taken at
+/// face value that reads as "this zone has no keys" or "no proof was sent",
+/// and turns a resolver hiccup into a BOGUS verdict. It is a failed lookup:
+/// ask again after `pause`, and if it keeps happening, say so rather than
+/// judge the data.
+fn complete_response(
+    name: &str,
+    rtype: RecordType,
+    pause: Duration,
+    send: impl Fn() -> Result<DnsMessage, DnsError>,
+) -> Result<DnsMessage, DnsError> {
+    let mut problem = "";
+    for attempt in 0..=INCOMPLETE_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(pause * attempt);
+        }
+        let message = send()?;
+        if message.header.tc {
+            problem = "a truncated response";
+        } else if message.edns.is_none() {
+            problem = "a response without EDNS";
+        } else {
+            return Ok(message);
+        }
+    }
+    Err(DnsError::Protocol(format!(
+        "resolver kept returning {} for {} {}; cannot validate (try another resolver, e.g. @1.1.1.1)",
+        problem, name, rtype
+    )))
 }
 
 /// Core validation, parameterized over time and record fetching so tests
@@ -210,6 +257,19 @@ fn validate_answer(
                 "resolver answered {}; there is no answer to validate",
                 answer.header.rcode
             )),
+        });
+    }
+
+    // No OPT record means the resolver ignored the DO bit, so the response
+    // holds no DNSSEC records whatever the zone publishes. Judging it would
+    // blame the zone for the resolver.
+    if answer.edns.is_none() {
+        return Ok(ValidationReport {
+            links,
+            status: ChainStatus::Insecure(
+                "the resolver's response has no EDNS record, so it carries no DNSSEC data; there is nothing to validate"
+                    .to_string(),
+            ),
         });
     }
 
@@ -4842,6 +4902,83 @@ mod tests {
             nodata.starts_with("NODATA proven: sub.example.com. has no record of its own"),
             "{}",
             nodata
+        );
+    }
+
+    fn truncated() -> DnsMessage {
+        // QR, TC and RD set, no records, and an OPT record so that only the TC
+        // bit is wrong with it.
+        DnsMessage::parse(&[
+            0x12, 0x34, 0x83, 0x80, 0, 0, 0, 0, 0, 0, 0, 1, // header, ARCOUNT 1
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 0, // OPT, DO set
+        ])
+        .unwrap()
+    }
+
+    /// Header only: NOERROR, nothing in it, and no OPT record.
+    fn without_edns() -> DnsMessage {
+        DnsMessage::parse(&[0x12, 0x34, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap()
+    }
+
+    #[test]
+    fn unusable_response_is_asked_for_again() {
+        use std::cell::Cell;
+        assert!(truncated().header.tc && truncated().edns.is_some());
+        assert!(without_edns().edns.is_none());
+
+        // Truncated, then without EDNS, then whole: the third is the one used.
+        let calls = Cell::new(0);
+        let message = complete_response("org.", RecordType::DNSKEY, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            match calls.get() {
+                1 => Ok(truncated()),
+                2 => Ok(without_edns()),
+                _ => DnsMessage::parse(CF_DNSKEY),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 3);
+        assert!(!message.answers.is_empty());
+    }
+
+    #[test]
+    fn response_that_stays_unusable_is_an_error_not_a_verdict() {
+        use std::cell::Cell;
+        for (bad, text) in [
+            (
+                truncated as fn() -> DnsMessage,
+                "a truncated response for org. DNSKEY",
+            ),
+            (without_edns, "a response without EDNS for org. DNSKEY"),
+        ] {
+            let calls = Cell::new(0);
+            let err = complete_response("org.", RecordType::DNSKEY, Duration::ZERO, || {
+                calls.set(calls.get() + 1);
+                Ok(bad())
+            })
+            .expect_err("an unusable response must not be returned as data");
+            assert_eq!(calls.get(), INCOMPLETE_RETRIES + 1);
+            assert!(err.to_string().contains(text), "{}", err);
+        }
+    }
+
+    #[test]
+    fn answer_without_edns_is_not_judged() {
+        let no_fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            panic!("unexpected fetch: {} {}", name, rtype)
+        };
+        let report = validate_with(
+            &without_edns(),
+            "example.com",
+            RecordType::A,
+            FIXED_NOW,
+            &no_fetch,
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("no EDNS")),
+            "{:?}",
+            report.status
         );
     }
 }
