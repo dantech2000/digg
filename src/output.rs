@@ -333,6 +333,7 @@ mod tests {
             version: 0,
             dnssec_ok: true,
             subnet: None,
+            extended_errors: Vec::new(),
             nsid: None,
         });
         result.message.header.ad = true;
@@ -356,6 +357,7 @@ mod tests {
                 scope_prefix: 18,
                 address: "96.112.0.0".to_string(),
             }),
+            extended_errors: Vec::new(),
             nsid: None,
         });
         let painter = Painter::with_color(false);
@@ -372,6 +374,7 @@ mod tests {
             version: 0,
             dnssec_ok: false,
             subnet: None,
+            extended_errors: Vec::new(),
             nsid: Some(crate::protocol::edns::Nsid {
                 hex: "6c617833".to_string(),
                 text: Some("lax3".to_string()),
@@ -615,6 +618,7 @@ mod tests {
             version: 0,
             dnssec_ok: false,
             subnet: None,
+            extended_errors: Vec::new(),
             nsid: None,
         });
         let text = render(|out| write_compat(out, &result, "s", 53, 0, &compat_all()));

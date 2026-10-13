@@ -3,6 +3,8 @@ use std::net::IpAddr;
 
 /// EDNS option code for NSID (RFC 5001).
 pub const OPTION_NSID: u16 = 3;
+/// RFC 8914 Extended DNS Error.
+pub const OPTION_EXTENDED_ERROR: u16 = 15;
 /// EDNS option code for Client Subnet (RFC 7871).
 pub const OPTION_CLIENT_SUBNET: u16 = 8;
 
@@ -174,6 +176,18 @@ pub struct EdnsInfo {
     pub subnet: Option<ClientSubnet>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nsid: Option<Nsid>,
+    /// RFC 8914 extended errors: the resolver's own account of why the answer
+    /// is what it is (filtered, bogus, stale, ...).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extended_errors: Vec<ExtendedError>,
+}
+
+/// One RFC 8914 Extended DNS Error option.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExtendedError {
+    pub code: u16,
+    /// The optional free-text part, as sent.
+    pub text: String,
 }
 
 /// Parse EDNS info from an OPT record's raw fields.
@@ -188,6 +202,7 @@ pub fn decode_opt_record(class_val: u16, ttl_val: u32, rdata: &[u8]) -> EdnsInfo
         dnssec_ok: ttl_bytes[2] & 0x80 != 0,
         subnet: None,
         nsid: None,
+        extended_errors: Vec::new(),
     };
 
     let mut pos = 0;
@@ -201,6 +216,10 @@ pub fn decode_opt_record(class_val: u16, ttl_val: u32, rdata: &[u8]) -> EdnsInfo
         match code {
             OPTION_CLIENT_SUBNET => info.subnet = parse_client_subnet(&rdata[pos..pos + len]),
             OPTION_NSID => info.nsid = Some(parse_nsid(&rdata[pos..pos + len])),
+            OPTION_EXTENDED_ERROR if len >= 2 => info.extended_errors.push(ExtendedError {
+                code: u16::from_be_bytes([rdata[pos], rdata[pos + 1]]),
+                text: String::from_utf8_lossy(&rdata[pos + 2..pos + len]).into_owned(),
+            }),
             _ => {}
         }
         pos += len;
@@ -377,5 +396,36 @@ mod tests {
         let rdlength = u16::from_be_bytes([encoded[9], encoded[10]]);
         assert_eq!(rdlength, 4); // option code + zero length, no payload
         assert_eq!(&encoded[11..], &[0x00, 0x03, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn extended_errors_are_parsed_with_and_without_text() {
+        // Option 15, length 2: code 17 (Filtered), no text. Then option 15,
+        // length 7: code 6 (DNSSEC Bogus) with the text "bogus".
+        let rdata = [
+            0, 15, 0, 2, 0, 17, //
+            0, 15, 0, 7, 0, 6, b'b', b'o', b'g', b'u', b's',
+        ];
+        let info = decode_opt_record(1232, 0, &rdata);
+        assert_eq!(
+            info.extended_errors,
+            vec![
+                ExtendedError {
+                    code: 17,
+                    text: String::new()
+                },
+                ExtendedError {
+                    code: 6,
+                    text: "bogus".to_string()
+                },
+            ]
+        );
+        // Too short to hold a code: ignored.
+        assert!(decode_opt_record(1232, 0, &[0, 15, 0, 1, 0])
+            .extended_errors
+            .is_empty());
+        // Absent from the JSON form unless there is one.
+        let plain = serde_json::to_string(&decode_opt_record(1232, 0, &[])).unwrap();
+        assert!(!plain.contains("extended_errors"), "{}", plain);
     }
 }
