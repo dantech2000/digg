@@ -220,17 +220,22 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
             output::print_query(&parsed, &server, opts.port);
         }
 
-        let result = if opts.dot {
-            dot::send_dot_query(&server, &query, timeout)?
-        } else if let Some(ref url) = doh_url {
-            doh::send_doh_query(url, &query, timeout)?
-        } else {
-            transport::send_query_with_retries(
-                &server, opts.port, &query, opts.tcp, timeout, opts.retry,
-            )?
+        // One way out for every query of this run. +validate sends its own
+        // lookups through the same closure, so a user who chose DoT or DoH
+        // does not have the follow-up questions leave in plain text.
+        let send = |query: &[u8]| -> Result<transport::QueryResult, DnsError> {
+            if opts.dot {
+                dot::send_dot_query(&server, query, timeout)
+            } else if let Some(ref url) = doh_url {
+                doh::send_doh_query(url, query, timeout)
+            } else {
+                transport::send_query_with_retries(
+                    &server, opts.port, query, opts.tcp, timeout, opts.retry,
+                )
+            }
         };
 
-        let result = result.verify_id(query_id)?;
+        let result = send(&query)?.verify_id(query_id)?;
 
         if opts.json {
             output::print_json(&result);
@@ -263,15 +268,7 @@ pub fn run(args: &[String]) -> Result<i32, DnsError> {
         }
 
         if opts.validate && !opts.json && !opts.yaml && !opts.tsv {
-            let report = dnssec::validate(
-                &server,
-                opts.port,
-                &result.message,
-                name,
-                *qtype,
-                timeout,
-                opts.cd,
-            )?;
+            let report = dnssec::validate(&send, &result.message, name, *qtype, opts.cd)?;
             output::print_validation(&report);
             if matches!(report.status, dnssec::ChainStatus::Bogus(_)) {
                 exit_code = exit_code.max(2);
