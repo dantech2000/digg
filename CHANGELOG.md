@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0](https://github.com/dantech2000/digg/compare/v0.5.4...v0.6.0) (2026-10-13)
+
+
+### Features
+
+* **dnssec:** validate DNAME redirections in +validate ([ddee9e5](https://github.com/dantech2000/digg/commit/ddee9e58c2ba3321f88249860d77156eae5853df)), closes [#87](https://github.com/dantech2000/digg/issues/87)
+* **output:** show the resolver's extended DNS errors ([#118](https://github.com/dantech2000/digg/issues/118)) ([e537e77](https://github.com/dantech2000/digg/commit/e537e7756490a0f9b3135fff18c083b8f427f3e9))
+* **protocol:** decode DNAME records ([f117543](https://github.com/dantech2000/digg/commit/f117543e3aa04ea975bb96c4c83624244a60a586))
+* **protocol:** parse Extended DNS Errors from the OPT record ([d7c1b16](https://github.com/dantech2000/digg/commit/d7c1b1619115222accee56348f6bc29d80ef1d54))
+
+
+### Bug Fixes
+
+* **cli:** warn when +validate is combined with a structured output format ([3f4eec9](https://github.com/dantech2000/digg/commit/3f4eec9ed68131d074d0481c9078f0925ec58e93))
+* **dnssec:** accept RSA/SHA-512 signatures from keys under 2048 bits ([3b4fdbd](https://github.com/dantech2000/digg/commit/3b4fdbd8166903d0f8d7e5857b1bfce26ccd58f4))
+* **dnssec:** finish the negative-answer proofs in +validate ([977b7b0](https://github.com/dantech2000/digg/commit/977b7b070aec54aac572ad06c2060574ef6de2a5))
+* **dnssec:** follow the answer from the query name and check who signed it ([28a8972](https://github.com/dantech2000/digg/commit/28a897205adcd07373d7bed3e8f345e55203e033)), closes [#107](https://github.com/dantech2000/digg/issues/107)
+* **dnssec:** label a wildcard or empty-non-terminal denial as NODATA ([50fd3ba](https://github.com/dantech2000/digg/commit/50fd3ba92d428ab35341662a9c6afe50544fdffe))
+* **dnssec:** report a DS query answered with a CNAME as a failed lookup ([#119](https://github.com/dantech2000/digg/issues/119)) ([be6994c](https://github.com/dantech2000/digg/commit/be6994ca3acb1c69058239ad727ae868b6089d2e))
+* **dnssec:** require proof of an unsigned delegation before reporting INSECURE ([#112](https://github.com/dantech2000/digg/issues/112)) ([34a428c](https://github.com/dantech2000/digg/commit/34a428cdd7d293b0578a6dd77a5cd40696f30845)), closes [#110](https://github.com/dantech2000/digg/issues/110)
+* **dnssec:** require the nonexistence proof for wildcard answers in +validate ([144fd4c](https://github.com/dantech2000/digg/commit/144fd4cce96037fdfd6e44755baaf4c0eb03dd67)), closes [#87](https://github.com/dantech2000/digg/issues/87)
+* **dnssec:** require the parent's signature on every DS in +validate ([f5e180e](https://github.com/dantech2000/digg/commit/f5e180e01d95b613700c17cb12c9a5ed0e112450))
+* **dnssec:** send +validate's lookups over the transport the user chose ([#117](https://github.com/dantech2000/digg/issues/117)) ([406fda9](https://github.com/dantech2000/digg/commit/406fda9f4df9c5ece3a0880a41832779ea14ff90))
+* **dnssec:** stop a replayed wildcard NSEC from proving NXDOMAIN in +validate ([da05abb](https://github.com/dantech2000/digg/commit/da05abbe832baf2e32529fe20095aaeee514ceca))
+* **dnssec:** stop reading a truncated or EDNS-less reply as missing data ([f84308c](https://github.com/dantech2000/digg/commit/f84308ca72294eade720512662f45422063ab60c))
+* **dnssec:** stop six more false BOGUS verdicts found by a large sweep ([2df9fd4](https://github.com/dantech2000/digg/commit/2df9fd47a71690e2a885819ab0513241afbae455))
+* **dnssec:** treat a failure or an empty key set from the resolver as no answer ([c9b6292](https://github.com/dantech2000/digg/commit/c9b629254616dd42e55548677c85697e50ca076a))
+* **dnssec:** treat zones on unimplemented algorithms as unsigned, not bogus ([e7db1b1](https://github.com/dantech2000/digg/commit/e7db1b110bb5e80835943b0f90a920e4a42ee789))
+* **protocol:** keep a dot inside a label when decoding and encoding names ([f03fc29](https://github.com/dantech2000/digg/commit/f03fc296c0a9d03a070557ce41d970ba225677c5))
+
+
+### Performance Improvements
+
+* **dnssec:** look up every signing zone's chain in one round ([145d1f6](https://github.com/dantech2000/digg/commit/145d1f604e2cb2119b8ef9dd5070d11663c27dcb))
+* **doh:** reuse one HTTP agent, and its connections, across requests ([352b473](https://github.com/dantech2000/digg/commit/352b473d178c4033121a6cb955295bc16b160594))
+* **dot:** carry every query of a run on one DoT connection ([e768ca3](https://github.com/dantech2000/digg/commit/e768ca3dc61fae1ca7554f065fbd24f2f148b8b9))
+* **transport:** send the TCP length prefix and the query in one write ([3ae58e5](https://github.com/dantech2000/digg/commit/3ae58e563c370cd8bb1fa5b1701b8b526f991bd7))
+
 ## [0.5.4](https://github.com/dantech2000/digg/compare/v0.5.3...v0.5.4) (2026-09-06)
 
 
