@@ -1566,6 +1566,11 @@ fn validate_denial(
         });
     }
 
+    // The same proof shape serves two answers. With NXDOMAIN the name does
+    // not exist; with NOERROR it has no record of its own and the answer came
+    // from a wildcard or an empty non-terminal, which is NODATA.
+    let nxdomain = answer.header.rcode == Rcode::NxDomain;
+
     // Signatures are valid; now the cover proof, over only the records that
     // are individually signed by this zone and not wildcard-expanded. The
     // check above passes as soon as one RRset verifies, which an unsigned or
@@ -1575,9 +1580,9 @@ fn validate_denial(
     let nsec3_recs =
         verified_denial_records(&answer.authority, RecordType::NSEC3, &signer, &dnskeys, now);
     let proven = if !nsec3_recs.is_empty() {
-        prove_nsec3(&nsec3_recs, qname, &signer, qtype)
+        prove_nsec3(&nsec3_recs, qname, &signer, qtype, nxdomain)
     } else if !nsec_recs.is_empty() {
-        prove_nsec(&nsec_recs, qname, qtype)
+        prove_nsec(&nsec_recs, qname, qtype, nxdomain)
     } else {
         Err(format!("no validly signed {} record", denial_type))
     };
@@ -1676,7 +1681,12 @@ fn canonical_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// Prove NXDOMAIN or NODATA from NSEC records.
-fn prove_nsec(nsecs: &[&ResourceRecord], qname: &str, qtype: RecordType) -> Result<String, String> {
+fn prove_nsec(
+    nsecs: &[&ResourceRecord],
+    qname: &str,
+    qtype: RecordType,
+    nxdomain: bool,
+) -> Result<String, String> {
     // NODATA: an NSEC whose owner is exactly qname, with qtype absent from its
     // type bitmap (and no CNAME, which would have been followed).
     for rr in nsecs {
@@ -1699,9 +1709,14 @@ fn prove_nsec(nsecs: &[&ResourceRecord], qname: &str, qtype: RecordType) -> Resu
             continue;
         };
         if nsec_covers(rr, qname) {
+            let what = if nxdomain {
+                "NXDOMAIN proven".to_string()
+            } else {
+                format!("NODATA proven: {} has no record of its own", qname)
+            };
             return Ok(format!(
-                "NXDOMAIN proven: NSEC {} < {} < {}",
-                rr.name, qname, next_domain
+                "{}: NSEC {} < {} < {}",
+                what, rr.name, qname, next_domain
             ));
         }
     }
@@ -1793,6 +1808,7 @@ fn prove_nsec3(
     qname: &str,
     zone: &str,
     qtype: RecordType,
+    nxdomain: bool,
 ) -> Result<String, String> {
     let (iterations, salt) = match &nsec3s[0].rdata {
         RData::NSEC3 {
@@ -1821,9 +1837,15 @@ fn prove_nsec3(
 
     // NXDOMAIN: closest-encloser proof.
     let proof = nsec3_closest_encloser(nsec3s, qname, zone)?;
+    let what = if nxdomain {
+        "NXDOMAIN proven".to_string()
+    } else {
+        format!("NODATA proven: {} has no record of its own", qname)
+    };
     if proof.wildcard_denied || proof.opt_out {
         Ok(format!(
-            "NXDOMAIN proven: closest encloser {}, next-closer covered{}",
+            "{}: closest encloser {}, next-closer covered{}",
+            what,
             proof.encloser,
             if proof.opt_out {
                 " (opt-out)"
@@ -4802,5 +4824,24 @@ mod tests {
         assert_eq!(check(&[ds(5, 2), ds(13, 2)]), None);
         // A known algorithm behind a digest type that is not implemented.
         assert_eq!(check(&[ds(13, 3)]), Some("13".to_string()));
+    }
+
+    #[test]
+    fn cover_proof_is_labelled_by_the_response_code() {
+        let gap = nsec("a.example.com.", "t.example.com.");
+        let nxdomain = prove_nsec(&[&gap], "sub.example.com.", RecordType::A, true).unwrap();
+        assert!(
+            nxdomain.starts_with("NXDOMAIN proven: NSEC"),
+            "{}",
+            nxdomain
+        );
+        // NOERROR with the same proof: the answer came from a wildcard or an
+        // empty non-terminal, and the name was not denied outright.
+        let nodata = prove_nsec(&[&gap], "sub.example.com.", RecordType::A, false).unwrap();
+        assert!(
+            nodata.starts_with("NODATA proven: sub.example.com. has no record of its own"),
+            "{}",
+            nodata
+        );
     }
 }
