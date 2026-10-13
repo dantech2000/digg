@@ -338,6 +338,8 @@ fn validate_answer(
         });
     }
 
+    prefetch_signers(answer, fetch);
+
     // Every zone that signed a step of the answer. Each is walked to the root.
     let mut zones: Vec<String> = Vec::new();
     // How the chain ended, when it did not end at a signed RRset.
@@ -732,6 +734,12 @@ fn prefetch_chain(
     start: &str,
     fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
 ) {
+    prefetch(&chain_lookups(start), fetch);
+}
+
+/// The lookups a walk from `start` to the root will make: each zone's DNSKEY,
+/// and for every zone but the root its DS.
+fn chain_lookups(start: &str) -> Vec<(String, RecordType)> {
     let mut wanted: Vec<(String, RecordType)> = Vec::new();
     let mut zone = start.to_string();
     loop {
@@ -742,13 +750,62 @@ fn prefetch_chain(
         wanted.push((zone.clone(), RecordType::DS));
         zone = parent_zone(&zone);
     }
+    wanted
+}
 
-    // Results are discarded: this runs purely to populate the memo in
-    // validate_with, and any error here is re-encountered by the real walk,
-    // which is where it gets reported.
-    parallel::map(&wanted, usize::MAX, |(name, rtype)| {
+/// Ask for all of `wanted` at once.
+///
+/// Results are discarded: this runs purely to populate the memo in
+/// validate_with, and any error here is re-encountered by the real walk,
+/// which is where it gets reported.
+fn prefetch(
+    wanted: &[(String, RecordType)],
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+) {
+    parallel::map(wanted, usize::MAX, |(name, rtype)| {
         let _ = fetch(name, *rtype);
     });
+}
+
+/// How many signing zones the first round will look up on the response's
+/// say-so. A real answer names one or two; the cap keeps a response that
+/// names dozens from turning into dozens of lookups.
+const MAX_PREFETCH_SIGNERS: usize = 4;
+
+/// Warm the cache for every zone that signed something in the response, in
+/// one round, before any of it is verified.
+///
+/// The RRSIGs name their signers, so the zones whose keys and chains the
+/// walk will need are known the moment the answer arrives. Asking for them
+/// one step at a time cost a round trip for the keys of each signing zone and
+/// another for each chain. As with prefetch_chain, this only predicts what to
+/// ask for: nothing fetched here is trusted until the walk verifies it. A
+/// signer that does not contain the record it signs is left out, since the
+/// walk rejects it without any lookup.
+fn prefetch_signers(
+    answer: &DnsMessage,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+) {
+    let mut signers: Vec<&String> = Vec::new();
+    for rr in answer.answers.iter().chain(&answer.authority) {
+        let RData::RRSIG { signer, .. } = &rr.rdata else {
+            continue;
+        };
+        if in_zone(&rr.name, signer) && !signers.iter().any(|known| names_equal(known, signer)) {
+            signers.push(signer);
+        }
+    }
+    signers.truncate(MAX_PREFETCH_SIGNERS);
+
+    let mut wanted: Vec<(String, RecordType)> = Vec::new();
+    for signer in signers {
+        for lookup in chain_lookups(signer) {
+            if !wanted.contains(&lookup) {
+                wanted.push(lookup);
+            }
+        }
+    }
+    prefetch(&wanted, fetch);
 }
 
 /// Walk from `zone` up to the root, verifying each zone's DNSKEY RRset and
@@ -1219,11 +1276,27 @@ fn classify_unsigned(
         .map(|depth| format!("{}.", labels[labels.len() - depth..].join(".")))
         .collect();
 
-    // Results are discarded: this only warms the memo in validate_with so the
-    // walk below is one parallel round, not one round trip per label.
-    parallel::map(&cuts, usize::MAX, |cut| {
-        let _ = fetch(cut, RecordType::DS);
-    });
+    // Two rounds warm the memo in validate_with for the whole walk below.
+    // First the DS at every cut, and the root's keys, which any proof ends at.
+    let mut first: Vec<(String, RecordType)> = cuts
+        .iter()
+        .map(|cut| (cut.clone(), RecordType::DS))
+        .collect();
+    first.push((".".to_string(), RecordType::DNSKEY));
+    prefetch(&first, fetch);
+    // Then the keys of the zones those DS records show to be signed: the last
+    // of them signs the proof for the first cut without a DS, and all of them
+    // are on the chain from there to the root. Zones past that cut are not
+    // asked, because an unsigned zone has no keys to return.
+    let signed: Vec<(String, RecordType)> = cuts
+        .iter()
+        .take_while(|cut| {
+            fetch(cut, RecordType::DS)
+                .is_ok_and(|msg| owned_by(&msg.answers, cut, RecordType::DS).next().is_some())
+        })
+        .map(|cut| (cut.clone(), RecordType::DNSKEY))
+        .collect();
+    prefetch(&signed, fetch);
 
     for cut in &cuts {
         // Every name reached here sits below signed delegations only, so its
@@ -6171,5 +6244,73 @@ mod tests {
         )
         .expect_err("an unanswered DS query must not produce a verdict");
         assert!(err.to_string().contains("by following a CNAME"), "{}", err);
+    }
+
+    fn recorded_prefetch(answer: &DnsMessage) -> Vec<(String, RecordType)> {
+        let seen: Mutex<Vec<(String, RecordType)>> = Mutex::new(Vec::new());
+        let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            seen.lock().unwrap().push((name.to_string(), rtype));
+            DnsMessage::parse(&[0u8; 12])
+        };
+        prefetch_signers(answer, &fetch);
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_by(|a, b| (a.0.as_str(), a.1.to_u16()).cmp(&(b.0.as_str(), b.1.to_u16())));
+        seen
+    }
+
+    /// The DNAME fixture is signed by two zones under nl. Everything both
+    /// chains need is asked for in one round, and what they share once.
+    #[test]
+    fn every_signing_zones_chain_is_looked_up_in_one_round() {
+        let seen = recorded_prefetch(&full_message(DNAME_CHAIN));
+        let mut expected: Vec<(String, RecordType)> = Vec::new();
+        for lookup in chain_lookups("sidnlabs.nl.")
+            .into_iter()
+            .chain(chain_lookups("example.nl."))
+        {
+            if !expected.contains(&lookup) {
+                expected.push(lookup);
+            }
+        }
+        expected.sort_by(|a, b| (a.0.as_str(), a.1.to_u16()).cmp(&(b.0.as_str(), b.1.to_u16())));
+        assert_eq!(seen, expected);
+        // sidnlabs.nl and example.nl each need DNSKEY and DS; nl needs both
+        // and the root its DNSKEY, once each.
+        assert_eq!(seen.len(), 7, "{:?}", seen);
+    }
+
+    #[test]
+    fn prefetch_ignores_signers_the_walk_would_reject_and_caps_the_rest() {
+        // A signer that does not contain the record it signs is never asked
+        // about: the walk refuses it before any lookup.
+        let mut answer = DnsMessage::parse(CF_A).unwrap();
+        for rr in &mut answer.answers {
+            rr.name = "victim.org.".to_string();
+        }
+        assert!(recorded_prefetch(&answer).is_empty());
+
+        // A response naming many signers gets lookups for a few of them.
+        let mut answer = DnsMessage::parse(CF_A).unwrap();
+        let template = answer
+            .answers
+            .iter()
+            .find(|rr| rr.rtype == RecordType::RRSIG)
+            .unwrap()
+            .clone();
+        answer.answers.clear();
+        for i in 0..20 {
+            let mut rr = template.clone();
+            rr.name = format!("www.zone{}.example.", i);
+            if let RData::RRSIG { signer, .. } = &mut rr.rdata {
+                *signer = format!("zone{}.example.", i);
+            }
+            answer.answers.push(rr);
+        }
+        let seen = recorded_prefetch(&answer);
+        let zones = seen
+            .iter()
+            .filter(|(name, rtype)| *rtype == RecordType::DNSKEY && name.starts_with("zone"))
+            .count();
+        assert_eq!(zones, MAX_PREFETCH_SIGNERS);
     }
 }
