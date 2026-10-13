@@ -736,30 +736,55 @@ fn chain_to_root(
             }
         }
 
-        // 3d. The DS RRset itself is signed by the parent zone.
-        let parent = rrsigs_covering(&ds_msg.answers, RecordType::DS)
-            .find_map(|rr| match &rr.rdata {
-                RData::RRSIG { signer, .. } => Some(signer.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| parent_zone(&zone));
-        let ds_sig = rrsigs_covering(&ds_msg.answers, RecordType::DS).next();
-        if let Some(sig) = ds_sig {
-            let parent_keys_msg = fetch(&parent, RecordType::DNSKEY)?;
-            let parent_keys = records_of(&parent_keys_msg.answers, RecordType::DNSKEY);
+        // 3d. The DS RRset itself must be signed by the parent zone. Without
+        // that, the digest above only shows the DS and the keys agree with
+        // each other, which a forger supplying both can arrange. DS lives on
+        // the parent side of the cut, so the signer must be a zone above this
+        // one, never this zone itself or an unrelated one.
+        let ds_sigs: Vec<&ResourceRecord> = rrsigs_covering(&ds_msg.answers, RecordType::DS)
+            .filter(|rr| names_equal(&rr.name, &zone))
+            .collect();
+        let signed_by = |rr: &ResourceRecord| match &rr.rdata {
+            RData::RRSIG { signer, .. }
+                if in_zone(&zone, signer) && !names_equal(&zone, signer) =>
+            {
+                Some(signer.clone())
+            }
+            _ => None,
+        };
+        let Some(parent) = ds_sigs.iter().find_map(|rr| signed_by(rr)) else {
+            let detail = "DS RRset is not signed by a parent zone";
+            let reason = format!("{}: DS signature invalid: {}", zone, detail);
+            return bogus(links, zone.clone(), detail, reason);
+        };
+        let parent_keys_msg = fetch(&parent, RecordType::DNSKEY)?;
+        let parent_keys = records_of(&parent_keys_msg.answers, RecordType::DNSKEY);
+        let mut verified = None;
+        let mut failure = String::new();
+        for sig in &ds_sigs {
+            if !signed_by(sig).is_some_and(|signer| names_equal(&signer, &parent)) {
+                continue;
+            }
             match verify_rrsig(&ds_set, sig, &parent_keys, now) {
-                Ok(tag) => links.push(LinkReport::ok(
-                    zone.clone(),
-                    format!("DS RRSIG verified by {} (key {})", parent, tag),
-                )),
-                Err(e) => {
-                    return bogus(
-                        links,
-                        zone.clone(),
-                        format!("DS RRSIG failed: {}", e),
-                        format!("{}: DS signature invalid: {}", zone, e),
-                    );
+                Ok(tag) => {
+                    verified = Some(tag);
+                    break;
                 }
+                Err(e) => failure = e,
+            }
+        }
+        match verified {
+            Some(tag) => links.push(LinkReport::ok(
+                zone.clone(),
+                format!("DS RRSIG verified by {} (key {})", parent, tag),
+            )),
+            None => {
+                return bogus(
+                    links,
+                    zone.clone(),
+                    format!("DS RRSIG failed: {}", failure),
+                    format!("{}: DS signature invalid: {}", zone, failure),
+                );
             }
         }
 
@@ -4269,5 +4294,68 @@ mod tests {
             "{:?}",
             report.status
         );
+    }
+
+    /// The DS is the only thing that ties a zone's keys to its parent. A DS
+    /// with no signature is a DS that anyone could have written, together
+    /// with a matching key of their own.
+    #[test]
+    fn unsigned_ds_does_not_anchor_a_zone() {
+        let stripped = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            let mut msg = cloudflare_chain(name, rtype)?;
+            if (name, rtype) == ("cloudflare.com.", RecordType::DS) {
+                msg.answers.retain(|rr| rr.rtype != RecordType::RRSIG);
+                assert!(!msg.answers.is_empty(), "fixture keeps its DS records");
+            }
+            Ok(msg)
+        };
+        let answer = DnsMessage::parse(CF_A).unwrap();
+        let report = validate_with(
+            &answer,
+            "cloudflare.com",
+            RecordType::A,
+            FIXED_NOW,
+            &stripped,
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Bogus(why) if why.contains("DS")),
+            "{:?}",
+            report.status
+        );
+    }
+
+    #[test]
+    fn ds_signed_by_anything_but_a_parent_does_not_anchor_a_zone() {
+        // The real DS and its real signature, relabelled as signed by the zone
+        // itself and by an unrelated zone. Neither can speak for the parent.
+        for claimed in ["cloudflare.com.", "example.org."] {
+            let relabelled = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+                let mut msg = cloudflare_chain(name, rtype)?;
+                if (name, rtype) == ("cloudflare.com.", RecordType::DS) {
+                    for rr in &mut msg.answers {
+                        if let RData::RRSIG { signer, .. } = &mut rr.rdata {
+                            *signer = claimed.to_string();
+                        }
+                    }
+                }
+                Ok(msg)
+            };
+            let answer = DnsMessage::parse(CF_A).unwrap();
+            let report = validate_with(
+                &answer,
+                "cloudflare.com",
+                RecordType::A,
+                FIXED_NOW,
+                &relabelled,
+            )
+            .unwrap();
+            assert!(
+                matches!(&report.status, ChainStatus::Bogus(why) if why.contains("not signed by a parent zone")),
+                "{}: {:?}",
+                claimed,
+                report.status
+            );
+        }
     }
 }
