@@ -273,19 +273,16 @@ pub fn validate_with(
     // and code 17), and saying so beats leaving a missing proof unexplained.
     if let ChainStatus::Bogus(why) = &mut report.status {
         let note = answer.edns.as_ref().and_then(|edns| {
-            edns.extended_errors.iter().find_map(|e| {
-                let what = match e.code {
-                    15 => "Blocked",
-                    16 => "Censored",
-                    17 => "Filtered",
-                    18 => "Prohibited",
-                    _ => return None,
-                };
-                Some(format!(
-                    "; the resolver reported extended error {} ({}), so it may have replaced the answer. Try another resolver",
-                    e.code, what
-                ))
-            })
+            edns.extended_errors
+                .iter()
+                .find(|e| (15..=18).contains(&e.code))
+                .map(|e| {
+                    format!(
+                        "; the resolver reported extended error {} ({}), so it may have replaced the answer. Try another resolver",
+                        e.code,
+                        e.purpose()
+                    )
+                })
         });
         if let Some(note) = note {
             why.push_str(&note);

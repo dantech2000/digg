@@ -366,6 +366,42 @@ mod tests {
     }
 
     #[test]
+    fn write_full_lists_extended_errors_and_sanitizes_their_text() {
+        use crate::protocol::edns::ExtendedError;
+        let mut result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
+        result.message.edns = Some(crate::protocol::edns::EdnsInfo {
+            udp_payload_size: 1232,
+            extended_rcode: 0,
+            version: 0,
+            dnssec_ok: true,
+            subnet: None,
+            extended_errors: vec![
+                ExtendedError {
+                    code: 17,
+                    text: String::new(),
+                },
+                ExtendedError {
+                    code: 6,
+                    text: "proof of non-existence \x1b[31mfailed".to_string(),
+                },
+            ],
+            nsid: None,
+        });
+        let painter = Painter::with_color(false);
+        let text = render(|out| write_full(out, &painter, &result, "s", 53, true, true, true));
+        assert!(text.contains(" EDE 17 (Filtered)\n"), "{}", text);
+        assert!(
+            text.contains(" EDE 6 (DNSSEC Bogus): proof of non-existence"),
+            "{}",
+            text
+        );
+        assert!(
+            !text.contains('\x1b'),
+            "escape sequence reached the terminal"
+        );
+    }
+
+    #[test]
     fn write_full_appends_returned_nsid() {
         let mut result = fixture_result(vec![a_record("example.com.", 60, [1, 2, 3, 4])]);
         result.message.edns = Some(crate::protocol::edns::EdnsInfo {
@@ -1075,6 +1111,23 @@ pub fn write_full<W: Write>(
             subnet,
             nsid
         );
+        // RFC 8914: the resolver's own account of the answer. The free text
+        // is whatever the server sent, so it is sanitized like record data.
+        for ede in &edns.extended_errors {
+            let text = if ede.text.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", sanitize_for_terminal(&ede.text))
+            };
+            let _ = writeln!(
+                out,
+                " {} {} ({}){}",
+                painter.paint(DIM, "EDE"),
+                ede.code,
+                ede.purpose(),
+                text
+            );
+        }
     }
 
     // DNSSEC flags

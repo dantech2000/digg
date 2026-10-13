@@ -190,6 +190,41 @@ pub struct ExtendedError {
     pub text: String,
 }
 
+impl ExtendedError {
+    /// The registered purpose of the code (RFC 8914 §4 and the IANA
+    /// registry), or "unassigned" for one this build does not know.
+    pub fn purpose(&self) -> &'static str {
+        match self.code {
+            0 => "Other",
+            1 => "Unsupported DNSKEY Algorithm",
+            2 => "Unsupported DS Digest Type",
+            3 => "Stale Answer",
+            4 => "Forged Answer",
+            5 => "DNSSEC Indeterminate",
+            6 => "DNSSEC Bogus",
+            7 => "Signature Expired",
+            8 => "Signature Not Yet Valid",
+            9 => "DNSKEY Missing",
+            10 => "RRSIGs Missing",
+            11 => "No Zone Key Bit Set",
+            12 => "NSEC Missing",
+            13 => "Cached Error",
+            14 => "Not Ready",
+            15 => "Blocked",
+            16 => "Censored",
+            17 => "Filtered",
+            18 => "Prohibited",
+            19 => "Stale NXDOMAIN Answer",
+            20 => "Not Authoritative",
+            21 => "Not Supported",
+            22 => "No Reachable Authority",
+            23 => "Network Error",
+            24 => "Invalid Data",
+            _ => "unassigned",
+        }
+    }
+}
+
 /// Parse EDNS info from an OPT record's raw fields.
 /// class_val = UDP payload size, ttl_val = extended RCODE + version + flags,
 /// rdata = the option list.
@@ -424,6 +459,8 @@ mod tests {
         assert!(decode_opt_record(1232, 0, &[0, 15, 0, 1, 0])
             .extended_errors
             .is_empty());
+        assert_eq!(info.extended_errors[0].purpose(), "Filtered");
+        assert_eq!(info.extended_errors[1].purpose(), "DNSSEC Bogus");
         // Absent from the JSON form unless there is one.
         let plain = serde_json::to_string(&decode_opt_record(1232, 0, &[])).unwrap();
         assert!(!plain.contains("extended_errors"), "{}", plain);
