@@ -808,6 +808,9 @@ fn chain_to_root(
                         bogus(links, zone.clone(), detail, reason)
                     }
                     Delegation::Unproven(why) => {
+                        if let Some(unanswered) = ds_question_unanswered(&ds_msg, &zone) {
+                            return Err(unanswered);
+                        }
                         // The parent may be unsigned itself, which leaves it
                         // unable to prove anything about this zone. Then the
                         // unsigned delegation is further up, and that makes
@@ -1283,6 +1286,9 @@ fn classify_unsigned(
             }
             Delegation::NotACut => {}
             Delegation::Unproven(why) => {
+                if let Some(unanswered) = ds_question_unanswered(&ds_msg, cut) {
+                    return Err(unanswered);
+                }
                 links.push(LinkReport::failed(
                     cut.clone(),
                     format!("no DS, and {}", why),
@@ -1304,6 +1310,24 @@ fn classify_unsigned(
 /// nothing, and how long it waits first. Tests do not wait.
 const UNPROVEN_RETRIES: u32 = 2;
 const UNPROVEN_PAUSE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 150 });
+
+/// Some resolvers answer a DS query for a zone that has a CNAME at its apex by
+/// following that CNAME, which returns neither the DS nor a proof that there
+/// is none (8.8.8.8 does this every time for medlineplus.gov). The question
+/// was not answered, so there is no verdict to give: fail with the reason.
+fn ds_question_unanswered(ds_msg: &DnsMessage, name: &str) -> Option<DnsError> {
+    if says_something_about_ds(ds_msg)
+        || owned_by(&ds_msg.answers, name, RecordType::CNAME)
+            .next()
+            .is_none()
+    {
+        return None;
+    }
+    Some(DnsError::Protocol(format!(
+        "the resolver answered the DS query for {} by following a CNAME, so it gave neither a DS nor a proof that there is none; cannot validate (try another resolver)",
+        name
+    )))
+}
 
 /// What a signed parent says about a name that has no DS.
 enum Delegation {
@@ -1331,10 +1355,14 @@ fn ds_denial(
 ) -> Result<Delegation, DnsError> {
     // A DS query for a name that holds a CNAME is answered by following it, so
     // the response carries the CNAME and no denial. A CNAME cannot sit at a
-    // delegation point, so a validly signed one settles the question.
+    // delegation point, so one signed by a zone above the name settles the
+    // question. One signed by the name itself does not: that is a zone with a
+    // CNAME at its own apex, seen from the child side, and says nothing about
+    // what its parent publishes.
     let cname_sig = rrsigs_covering(&ds_msg.answers, RecordType::CNAME).find(|rr| {
         names_equal(&rr.name, name)
-            && matches!(&rr.rdata, RData::RRSIG { signer, .. } if in_zone(name, signer))
+            && matches!(&rr.rdata, RData::RRSIG { signer, .. }
+                if in_zone(name, signer) && !names_equal(name, signer))
     });
     if let Some(sig) = cname_sig {
         let RData::RRSIG { signer, .. } = &sig.rdata else {
@@ -6083,5 +6111,65 @@ mod tests {
         assert!(seen.iter().all(|(_, _, do_bit)| *do_bit));
         assert!(seen.contains(&("cloudflare.com.".to_string(), RecordType::DNSKEY, true)));
         assert!(seen.contains(&(".".to_string(), RecordType::DNSKEY, true)));
+    }
+
+    #[test]
+    fn cname_signed_by_the_name_itself_is_not_the_parents_word() {
+        // The DS response for www.sidn.nl, relabelled so that the CNAME is
+        // signed by www.sidn.nl: a zone with a CNAME at its apex.
+        let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
+        let mut ds_msg = full_message(DS_AT_A_CNAME);
+        for rr in &mut ds_msg.answers {
+            if let RData::RRSIG { signer, .. } = &mut rr.rdata {
+                *signer = "www.sidn.nl.".to_string();
+            }
+        }
+        let found = ds_denial(&ds_msg, "www.sidn.nl.", FIXED_WILDCARD_NOW, &fetch).unwrap();
+        assert!(matches!(found, Delegation::Unproven(_)));
+    }
+
+    /// A DS query answered by following a CNAME answers nothing. That is a
+    /// failed lookup, reported as such, and not a verdict on the zone.
+    #[test]
+    fn ds_query_answered_with_a_cname_is_an_error_not_a_verdict() {
+        let cname_only = || {
+            let mut msg = DnsMessage::parse(&[0u8; 12]).unwrap();
+            msg.answers.push(ResourceRecord {
+                name: "apex.example.".to_string(),
+                rtype: RecordType::CNAME,
+                rclass: RecordClass::IN,
+                ttl: 300,
+                rdata: RData::CNAME("elsewhere.example.net.".to_string()),
+                raw_rdata: Vec::new(),
+            });
+            msg
+        };
+        assert!(ds_question_unanswered(&cname_only(), "apex.example.").is_some());
+        // An empty response, or one with a denial, is not this case.
+        assert!(
+            ds_question_unanswered(&DnsMessage::parse(&[0u8; 12]).unwrap(), "apex.example.")
+                .is_none()
+        );
+        assert!(
+            ds_question_unanswered(&full_message(DS_CLOUDFRONT_NET), "cloudfront.net.").is_none()
+        );
+
+        let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            match (name, rtype) {
+                ("example.", RecordType::DS) => Ok(ds_present("example.")),
+                ("apex.example.", RecordType::DS) => Ok(cname_only()),
+                _ => DnsMessage::parse(&[0u8; 12]),
+            }
+        };
+        let mut links = Vec::new();
+        let err = classify_unsigned(
+            "www.apex.example.",
+            FIXED_WILDCARD_NOW,
+            &fetch,
+            &mut links,
+            &mut Vec::new(),
+        )
+        .expect_err("an unanswered DS query must not produce a verdict");
+        assert!(err.to_string().contains("by following a CNAME"), "{}", err);
     }
 }
