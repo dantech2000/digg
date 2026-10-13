@@ -245,13 +245,54 @@ pub fn validate_with(
             return Ok(hit.clone());
         }
         let message = fetch(name, rtype)?;
-        seen.lock()
-            .expect("fetch cache poisoned")
-            .insert(key, message.clone());
+        // A DS response with neither a DS nor a denial is kept out of the
+        // cache, so that classify_unsigned can ask again and get a fresh one.
+        if rtype != RecordType::DS || says_something_about_ds(&message) {
+            seen.lock()
+                .expect("fetch cache poisoned")
+                .insert(key, message.clone());
+        }
         Ok(message)
     };
 
-    validate_answer(answer, qname, qtype, now, fetch, &mut Vec::new())
+    let mut report = validate_answer(answer, qname, qtype, now, fetch, &mut Vec::new())?;
+
+    // RFC 8914 codes 15-18 say a server on the way blocked, censored, filtered
+    // or refused something. On its own that proves nothing: resolvers attach
+    // such a note to a good answer when just one of a zone's name servers
+    // turned them away. But when the answer has already failed validation, it
+    // is the likely reason (Quad9 answers a blocked name with a bare NXDOMAIN
+    // and code 17), and saying so beats leaving a missing proof unexplained.
+    if let ChainStatus::Bogus(why) = &mut report.status {
+        let note = answer.edns.as_ref().and_then(|edns| {
+            edns.extended_errors.iter().find_map(|e| {
+                let what = match e.code {
+                    15 => "Blocked",
+                    16 => "Censored",
+                    17 => "Filtered",
+                    18 => "Prohibited",
+                    _ => return None,
+                };
+                Some(format!(
+                    "; the resolver reported extended error {} ({}), so it may have replaced the answer. Try another resolver",
+                    e.code, what
+                ))
+            })
+        });
+        if let Some(note) = note {
+            why.push_str(&note);
+        }
+    }
+    Ok(report)
+}
+
+/// Does a DS response carry a DS record or any NSEC/NSEC3 that could deny one?
+fn says_something_about_ds(message: &DnsMessage) -> bool {
+    message.answers.iter().any(|rr| rr.rtype == RecordType::DS)
+        || message
+            .authority
+            .iter()
+            .any(|rr| matches!(rr.rtype, RecordType::NSEC | RecordType::NSEC3))
 }
 
 /// The validation itself. `trusted` holds zones already verified to the root;
@@ -418,7 +459,7 @@ fn validate_answer(
         return bogus(
             links,
             zone.clone(),
-            "signed only with an algorithm digg does not implement, though the zone's DS names one it does",
+            "its signatures use an algorithm or key size digg does not accept, though the zone's own keys verify",
             format!("{}: the signatures digg could verify are missing", zone),
         );
     }
@@ -615,9 +656,12 @@ fn verify_answer_rrset(
         }
     }
     if verified.is_none()
-        && all_unsupported(rrsigs.iter().copied().filter(
-            |rr| matches!(&rr.rdata, RData::RRSIG { signer, .. } if names_equal(signer, &zone)),
-        ))
+        && all_unsupported(
+            rrsigs.iter().copied().filter(
+                |rr| matches!(&rr.rdata, RData::RRSIG { signer, .. } if names_equal(signer, &zone)),
+            ),
+            &dnskeys,
+        )
     {
         return Ok(Step::Unverifiable(zone));
     }
@@ -733,44 +777,67 @@ fn chain_to_root(
         if zone != "." {
             let ds_msg = fetch(&zone, RecordType::DS)?;
             let ds_set = records_of(&ds_msg.answers, RecordType::DS);
-            if let Some(algorithms) = unsupported_only(&ds_set) {
-                let parent = match verify_ds_rrsig(&zone, &ds_msg, &ds_set, now, fetch)? {
-                    DsSignature::Verified { parent, tag } => {
-                        links.push(LinkReport::ok(
-                            zone.clone(),
-                            format!("DS RRSIG verified by {} (key {})", parent, tag),
-                        ));
-                        parent
+            if ds_set.is_empty() {
+                // A zone with no DS is an island: whatever keys it has, they cannot
+                // be anchored. That is only believable when the parent proves it
+                // publishes no DS. Otherwise deleting the DS from a response would
+                // turn any signed zone into an "unsigned" one.
+                return match ds_denial(&ds_msg, &zone, now, fetch)? {
+                    Delegation::Unsigned { signer, detail, .. } => {
+                        links.push(LinkReport::ok(zone.clone(), detail));
+                        let report = chain_to_root(signer, now, fetch, links, trusted)?;
+                        Ok(match report.status {
+                            ChainStatus::Secure => ValidationReport {
+                                links: report.links,
+                                status: ChainStatus::Insecure(format!(
+                                    "{}: unsigned delegation, chain ends",
+                                    zone
+                                )),
+                            },
+                            _ => report,
+                        })
                     }
-                    // The parent is in the same position; its own turn decides.
-                    DsSignature::Unverifiable { parent } => parent,
-                    DsSignature::Invalid(e) => {
-                        return bogus(
-                            links,
-                            zone.clone(),
-                            format!("DS RRSIG failed: {}", e),
-                            format!("{}: DS signature invalid: {}", zone, e),
-                        );
+                    Delegation::NotACut => {
+                        let detail = "no DS at parent, and the parent shows no delegation here";
+                        let reason = format!("{}: {}", zone, detail);
+                        bogus(links, zone.clone(), detail, reason)
+                    }
+                    Delegation::Unproven(why) => {
+                        // The parent may be unsigned itself, which leaves it
+                        // unable to prove anything about this zone. Then the
+                        // unsigned delegation is further up, and that makes
+                        // everything below it Insecure, signed or not.
+                        let above = parent_zone(&zone);
+                        match classify_unsigned(&above, now, fetch, &mut links, trusted)? {
+                            status @ ChainStatus::Insecure(_) => {
+                                Ok(ValidationReport { links, status })
+                            }
+                            _ => {
+                                let detail = format!("no DS at parent, and {}", why);
+                                let reason = format!("{}: {}", zone, detail);
+                                bogus(links, zone.clone(), detail, reason)
+                            }
+                        }
                     }
                 };
-                links.push(LinkReport::ok(
-                    zone.clone(),
+            }
+            if let Some(algorithms) = unsupported_only(&ds_set) {
+                return end_at_unverifiable_zone(
+                    zone,
                     format!(
                         "DS names only algorithm {}, which digg does not implement",
                         algorithms
                     ),
-                ));
-                let report = chain_to_root(parent, now, fetch, links, trusted)?;
-                return Ok(match report.status {
-                    ChainStatus::Secure => ValidationReport {
-                        links: report.links,
-                        status: ChainStatus::Insecure(format!(
-                            "{}: signed only with algorithm {}, which digg does not implement; treated as unsigned",
-                            zone, algorithms
-                        )),
-                    },
-                    _ => report,
-                });
+                    format!(
+                        "signed only with algorithm {}, which digg does not implement",
+                        algorithms
+                    ),
+                    &ds_msg,
+                    now,
+                    fetch,
+                    links,
+                    trusted,
+                );
             }
         }
 
@@ -788,6 +855,20 @@ fn chain_to_root(
                 zone.clone(),
                 format!("DNSKEY RRset verified (KSK {})", tag),
             )),
+            None if zone != "." && all_unsupported(dnskey_sigs.iter().copied(), &dnskeys) => {
+                let ds_msg = fetch(&zone, RecordType::DS)?;
+                return end_at_unverifiable_zone(
+                    zone,
+                    "zone keys are RSA under 1024 bits, which digg does not accept".to_string(),
+                    "signed only with RSA keys shorter than 1024 bits, which digg does not accept"
+                        .to_string(),
+                    &ds_msg,
+                    now,
+                    fetch,
+                    links,
+                    trusted,
+                );
+            }
             None => {
                 let detail = if dnskey_sigs.is_empty() {
                     "DNSKEY RRset has no RRSIG".to_string()
@@ -830,39 +911,6 @@ fn chain_to_root(
         // 3c. Parent DS must match one of this zone's keys.
         let ds_msg = fetch(&zone, RecordType::DS)?;
         let ds_set = records_of(&ds_msg.answers, RecordType::DS);
-        if ds_set.is_empty() {
-            // A zone with keys but no DS is an island: its signatures cannot
-            // be anchored. That is only believable when the parent proves it
-            // publishes no DS. Otherwise deleting the DS from a response would
-            // turn any signed zone into an "unsigned" one.
-            return match ds_denial(&ds_msg, &zone, now, fetch)? {
-                Delegation::Unsigned { signer, detail, .. } => {
-                    links.push(LinkReport::ok(zone.clone(), detail));
-                    let report = chain_to_root(signer, now, fetch, links, trusted)?;
-                    Ok(match report.status {
-                        ChainStatus::Secure => ValidationReport {
-                            links: report.links,
-                            status: ChainStatus::Insecure(format!(
-                                "{}: unsigned delegation, chain ends",
-                                zone
-                            )),
-                        },
-                        _ => report,
-                    })
-                }
-                Delegation::NotACut => {
-                    let detail = "no DS at parent, and the parent shows no delegation here";
-                    let reason = format!("{}: {}", zone, detail);
-                    bogus(links, zone.clone(), detail, reason)
-                }
-                Delegation::Unproven(why) => {
-                    let detail = format!("no DS at parent, and {}", why);
-                    let reason = format!("{}: {}", zone, detail);
-                    bogus(links, zone.clone(), detail, reason)
-                }
-            };
-        }
-
         let ds_match = ds_set.iter().find_map(|ds| {
             let RData::DS {
                 key_tag: tag,
@@ -936,6 +984,55 @@ fn chain_to_root(
     }
 }
 
+/// End a chain walk at a zone whose signatures this validator cannot check.
+/// RFC 4035 §5.2 says to treat such a zone as unsigned. That is the parent's
+/// statement to make, through the DS it publishes, so the DS must still be
+/// signed by the parent and the parent must still lead to the root.
+#[allow(clippy::too_many_arguments)]
+fn end_at_unverifiable_zone(
+    zone: String,
+    link_detail: String,
+    status_detail: String,
+    ds_msg: &DnsMessage,
+    now: u32,
+    fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
+    mut links: Vec<LinkReport>,
+    trusted: &mut Vec<String>,
+) -> Result<ValidationReport, DnsError> {
+    let ds_set = records_of(&ds_msg.answers, RecordType::DS);
+    let parent = match verify_ds_rrsig(&zone, ds_msg, &ds_set, now, fetch)? {
+        DsSignature::Verified { parent, tag } => {
+            links.push(LinkReport::ok(
+                zone.clone(),
+                format!("DS RRSIG verified by {} (key {})", parent, tag),
+            ));
+            parent
+        }
+        // The parent is in the same position; its own turn decides.
+        DsSignature::Unverifiable { parent } => parent,
+        DsSignature::Invalid(e) => {
+            return bogus(
+                links,
+                zone.clone(),
+                format!("DS RRSIG failed: {}", e),
+                format!("{}: DS signature invalid: {}", zone, e),
+            );
+        }
+    };
+    links.push(LinkReport::ok(zone.clone(), link_detail));
+    let report = chain_to_root(parent, now, fetch, links, trusted)?;
+    Ok(match report.status {
+        ChainStatus::Secure => ValidationReport {
+            links: report.links,
+            status: ChainStatus::Insecure(format!(
+                "{}: {}; treated as unsigned",
+                zone, status_detail
+            )),
+        },
+        _ => report,
+    })
+}
+
 /// The DNSSEC signature algorithms verify_signature implements.
 fn supported_algorithm(algorithm: u8) -> bool {
     matches!(algorithm, 8 | 10 | 13 | 14 | 15)
@@ -969,16 +1066,59 @@ fn unsupported_only(ds_set: &[&ResourceRecord]) -> Option<String> {
     Some(names.join("/"))
 }
 
-/// Do all of these RRSIGs use an algorithm verify_signature lacks?
-fn all_unsupported<'a>(rrsigs: impl Iterator<Item = &'a ResourceRecord>) -> bool {
+/// The modulus size of an RSA DNSKEY (RFC 3110), if the key parses.
+fn rsa_modulus_bits(public_key: &[u8]) -> Option<usize> {
+    let exp_len = match *public_key.first()? {
+        0 => u16::from_be_bytes([*public_key.get(1)?, *public_key.get(2)?]) as usize + 3,
+        n => n as usize + 1,
+    };
+    let modulus = public_key.get(exp_len..)?;
+    let modulus = &modulus[modulus.iter().take_while(|&&b| b == 0).count()..];
+    Some(modulus.len() * 8)
+}
+
+/// Can verify_signature check this RRSIG at all? Not if its algorithm is not
+/// implemented, and not if it was made with an RSA key under 1024 bits, which
+/// the crypto library refuses. 512-bit zone keys still exist; a validator
+/// that cannot check them treats the zone like any other it cannot check,
+/// which is as unsigned (RFC 4035 §5.2), not as forged.
+fn usable_signature(rrsig: &ResourceRecord, dnskeys: &[&ResourceRecord]) -> bool {
+    let RData::RRSIG {
+        algorithm,
+        key_tag: tag,
+        ..
+    } = &rrsig.rdata
+    else {
+        return true;
+    };
+    if !supported_algorithm(*algorithm) {
+        return false;
+    }
+    if !matches!(algorithm, 8 | 10) {
+        return true;
+    }
+    let weak = dnskeys.iter().any(|key| {
+        key_tag(&key.raw_rdata) == *tag
+            && matches!(&key.rdata, RData::DNSKEY { algorithm: a, public_key, .. }
+                if a == algorithm && rsa_modulus_bits(public_key).is_some_and(|bits| bits < 1024))
+    });
+    !weak
+}
+
+/// Are there RRSIGs here, and can verify_signature check none of them?
+fn all_unsupported<'a>(
+    rrsigs: impl Iterator<Item = &'a ResourceRecord>,
+    dnskeys: &[&ResourceRecord],
+) -> bool {
     let mut any = false;
     for rr in rrsigs {
-        if let RData::RRSIG { algorithm, .. } = &rr.rdata {
-            if supported_algorithm(*algorithm) {
-                return false;
-            }
-            any = true;
+        if !matches!(rr.rdata, RData::RRSIG { .. }) {
+            continue;
         }
+        if usable_signature(rr, dnskeys) {
+            return false;
+        }
+        any = true;
     }
     any
 }
@@ -1026,12 +1166,11 @@ fn verify_ds_rrsig(
         .into_iter()
         .filter(|rr| by_parent(rr).is_some_and(|signer| names_equal(&signer, &parent)))
         .collect();
-    if all_unsupported(sigs.iter().copied()) {
-        return Ok(DsSignature::Unverifiable { parent });
-    }
-
     let parent_keys_msg = fetch(&parent, RecordType::DNSKEY)?;
     let parent_keys = records_of(&parent_keys_msg.answers, RecordType::DNSKEY);
+    if all_unsupported(sigs.iter().copied(), &parent_keys) {
+        return Ok(DsSignature::Unverifiable { parent });
+    }
     let mut failure = String::new();
     for sig in sigs {
         match verify_rrsig(ds_set, sig, &parent_keys, now) {
@@ -1079,7 +1218,29 @@ fn classify_unsigned(
     });
 
     for cut in &cuts {
-        let ds_msg = fetch(cut, RecordType::DS)?;
+        // Every name reached here sits below signed delegations only, so its
+        // parent owes either a DS or a proof that there is none. A response
+        // with neither is not a verdict yet: resolvers send one now and then
+        // (8.8.8.8 answered a DS query for a zone with a CNAME at its apex by
+        // following the CNAME, then answered properly a moment later). Ask
+        // again before concluding anything.
+        let mut attempt = 0;
+        let (ds_msg, denial) = loop {
+            let ds_msg = fetch(cut, RecordType::DS)?;
+            let denial = if owned_by(&ds_msg.answers, cut, RecordType::DS)
+                .next()
+                .is_some()
+            {
+                None
+            } else {
+                Some(ds_denial(&ds_msg, cut, now, fetch)?)
+            };
+            if attempt == UNPROVEN_RETRIES || !matches!(denial, Some(Delegation::Unproven(_))) {
+                break (ds_msg, denial);
+            }
+            attempt += 1;
+            std::thread::sleep(UNPROVEN_PAUSE * attempt);
+        };
         let ds_set: Vec<&ResourceRecord> = owned_by(&ds_msg.answers, cut, RecordType::DS).collect();
         if unsupported_only(&ds_set).is_some() {
             // Signed, but with nothing this validator implements: everything
@@ -1089,10 +1250,10 @@ fn classify_unsigned(
             *links = report.links;
             return Ok(report.status);
         }
-        if !ds_set.is_empty() {
+        let Some(denial) = denial else {
             continue;
-        }
-        match ds_denial(&ds_msg, cut, now, fetch)? {
+        };
+        match denial {
             Delegation::Unsigned {
                 signer,
                 detail,
@@ -1133,6 +1294,11 @@ fn classify_unsigned(
         name
     )))
 }
+
+/// How often classify_unsigned asks again for a DS response that proves
+/// nothing, and how long it waits first. Tests do not wait.
+const UNPROVEN_RETRIES: u32 = 2;
+const UNPROVEN_PAUSE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 150 });
 
 /// What a signed parent says about a name that has no DS.
 enum Delegation {
@@ -1662,17 +1828,20 @@ fn validate_denial(
         return Ok(DenialOutcome::Unsigned);
     };
     let signer = signer.clone();
-    if all_unsupported(answer.authority.iter().filter(|rr| {
-        matches!(&rr.rdata, RData::RRSIG { type_covered, signer: s, .. }
-            if *type_covered == denial_type && names_equal(s, &signer))
-    })) {
-        return Ok(DenialOutcome::Unverifiable(signer));
-    }
 
     // Fetch the signer's DNSKEY and verify every denial RRSIG (NSEC/NSEC3 and
     // the SOA) against it. Group records by owner+type so each RRset verifies.
     let dnskey_msg = fetch(&signer, RecordType::DNSKEY)?;
     let dnskeys = records_of(&dnskey_msg.answers, RecordType::DNSKEY);
+    if all_unsupported(
+        answer.authority.iter().filter(|rr| {
+            matches!(&rr.rdata, RData::RRSIG { type_covered, signer: s, .. }
+            if *type_covered == denial_type && names_equal(s, &signer))
+        }),
+        &dnskeys,
+    ) {
+        return Ok(DenialOutcome::Unverifiable(signer));
+    }
 
     let mut denial_links = Vec::new();
     if let Err(reason) = verify_denial_signatures(&answer.authority, &signer, &dnskeys, now) {
@@ -1793,15 +1962,23 @@ fn validate_denial(
     }
 }
 
-/// Verify the RRSIG over every NSEC/NSEC3/SOA RRset that `zone` signed in the
-/// authority section.
+/// Check that every NSEC/NSEC3/SOA RRset that `zone` signed in the authority
+/// section has a signature that verifies.
+///
+/// One good signature per RRset is enough (RFC 4035 §5.3.3). A zone that is
+/// changing algorithm or rolling a key signs each RRset more than once, and
+/// some of those signatures use an algorithm that is not implemented here or
+/// a key that is not published yet. Demanding all of them made every negative
+/// answer from such a zone Bogus.
 fn verify_denial_signatures(
     authority: &[ResourceRecord],
     zone: &str,
     dnskeys: &[&ResourceRecord],
     now: u32,
 ) -> Result<(), String> {
-    let mut verified_any = false;
+    // (owner, type) of each signed RRset, whether a signature verified, and
+    // the last failure if none has yet.
+    let mut rrsets: Vec<(String, RecordType, bool, String)> = Vec::new();
     for rr in authority {
         let RData::RRSIG {
             type_covered,
@@ -1822,13 +1999,30 @@ fn verify_denial_signatures(
         if covered.is_empty() {
             continue;
         }
-        verify_rrsig(&covered, rr, dnskeys, now)?;
-        verified_any = true;
+        let index = match rrsets
+            .iter()
+            .position(|(name, rtype, ..)| rtype == type_covered && names_equal(name, &rr.name))
+        {
+            Some(index) => index,
+            None => {
+                rrsets.push((rr.name.clone(), *type_covered, false, String::new()));
+                rrsets.len() - 1
+            }
+        };
+        if rrsets[index].2 {
+            continue;
+        }
+        match verify_rrsig(&covered, rr, dnskeys, now) {
+            Ok(_) => rrsets[index].2 = true,
+            Err(e) => rrsets[index].3 = e,
+        }
     }
-    if verified_any {
-        Ok(())
-    } else {
-        Err("no denial RRSIG could be verified".to_string())
+    if rrsets.is_empty() {
+        return Err("no denial RRSIG could be verified".to_string());
+    }
+    match rrsets.into_iter().find(|(_, _, verified, _)| !verified) {
+        Some((_, _, _, failure)) => Err(failure),
+        None => Ok(()),
     }
 }
 
@@ -5590,5 +5784,254 @@ mod tests {
         assert!(public_key.len() < 140, "key is {} bytes", public_key.len());
 
         verify_rrsig(&rrset, rrsig, &dnskeys, FIXED_RSA512_NOW).expect("signature verifies");
+    }
+
+    #[test]
+    fn ds_response_that_proves_nothing_is_asked_for_again() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // The first DS response for the cut is empty; the second is the real
+        // proof of the unsigned delegation.
+        let asked = AtomicU32::new(0);
+        let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            if (name, rtype) == ("test.dnssec-tools.org.", RecordType::DS)
+                && asked.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return DnsMessage::parse(&[0u8; 12]);
+            }
+            served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."])(name, rtype)
+        };
+        let (status, _) = classify("www.test.dnssec-tools.org.", &fetch, &["dnssec-tools.org."]);
+        assert!(matches!(status, ChainStatus::Insecure(_)), "{:?}", status);
+        assert!(asked.load(Ordering::SeqCst) >= 2);
+
+        // A response that never improves is still Bogus, after the retries.
+        let asked = AtomicU32::new(0);
+        let never = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            if (name, rtype) == ("test.dnssec-tools.org.", RecordType::DS) {
+                asked.fetch_add(1, Ordering::SeqCst);
+                return DnsMessage::parse(&[0u8; 12]);
+            }
+            served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."])(name, rtype)
+        };
+        let (status, _) = classify("www.test.dnssec-tools.org.", &never, &["dnssec-tools.org."]);
+        assert!(matches!(status, ChainStatus::Bogus(_)), "{:?}", status);
+        assert!(asked.load(Ordering::SeqCst) > UNPROVEN_RETRIES);
+    }
+
+    #[test]
+    fn ds_response_without_ds_or_denial_says_nothing() {
+        assert!(!says_something_about_ds(
+            &DnsMessage::parse(&[0u8; 12]).unwrap()
+        ));
+        assert!(says_something_about_ds(&ds_present("example.com.")));
+        assert!(says_something_about_ds(&full_message(DS_CLOUDFRONT_NET)));
+        // The CNAME-following answer carries the target's DS, not a denial for
+        // the name asked; it counts as saying something and is kept.
+        assert!(says_something_about_ds(&full_message(DS_AT_A_CNAME)));
+    }
+
+    /// A zone mid-rollover signs each RRset more than once, and not every
+    /// signature can be checked. One that verifies is enough.
+    #[test]
+    fn one_good_signature_per_denial_rrset_is_enough() {
+        let key_recs = answers(NSEC_NODATA_DNSKEY);
+        let dnskeys = keys(&key_recs);
+        let genuine = full_message(NSEC_NODATA).authority;
+        let check = |authority: &[ResourceRecord]| {
+            verify_denial_signatures(authority, "nlnetlabs.nl.", &dnskeys, FIXED_DENIAL_NOW)
+        };
+        assert!(check(&genuine).is_ok());
+
+        // Put a second signature in front of each real one: same RRset, but
+        // from an algorithm that is not implemented, and from an unknown key.
+        for (algorithm, tag_delta) in [(16u8, 0u16), (8, 1)] {
+            let mut authority = Vec::new();
+            for rr in &genuine {
+                if let RData::RRSIG { .. } = &rr.rdata {
+                    let mut extra = rr.clone();
+                    if let RData::RRSIG {
+                        algorithm: a,
+                        key_tag: t,
+                        ..
+                    } = &mut extra.rdata
+                    {
+                        *a = algorithm;
+                        *t = t.wrapping_add(tag_delta);
+                    }
+                    authority.push(extra);
+                }
+                authority.push(rr.clone());
+            }
+            assert!(authority.len() > genuine.len());
+            assert!(check(&authority).is_ok(), "algorithm {}", algorithm);
+        }
+
+        // With no signature that verifies, the RRset still fails.
+        let mut broken = genuine.clone();
+        for rr in &mut broken {
+            if let RData::RRSIG { signature, .. } = &mut rr.rdata {
+                signature[0] ^= 0xFF;
+            }
+        }
+        assert!(check(&broken).is_err());
+    }
+
+    /// A zone the parent proves unsigned is Insecure whatever its own key set
+    /// looks like. Here it has none at all.
+    #[test]
+    fn missing_ds_is_decided_before_the_zones_keys() {
+        let fetch = served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."]);
+        let report = chain_to_root(
+            "test.dnssec-tools.org.".to_string(),
+            FIXED_WILDCARD_NOW,
+            &fetch,
+            Vec::new(),
+            &mut vec!["dnssec-tools.org.".to_string()],
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("unsigned delegation")),
+            "{:?}",
+            report.status
+        );
+    }
+
+    /// Quad9 answers a blocked name with NXDOMAIN and extended error 17, and
+    /// no proof. The verdict is Bogus because the proof is missing; the note
+    /// from the resolver explains why it is.
+    #[test]
+    fn failed_answer_carries_the_resolvers_filtering_note() {
+        let answer = DnsMessage::parse(&[
+            0x12, 0x34, 0x81, 0x03, 0, 0, 0, 0, 0, 0, 0, 1, // NXDOMAIN, ARCOUNT 1
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0x80, 0, 0, 6, // OPT, DO set, 6 bytes of options
+            0, 15, 0, 2, 0, 17, // extended error 17
+        ])
+        .unwrap();
+        let nothing = |_: &str, _: RecordType| DnsMessage::parse(&[0u8; 12]);
+        let report = validate_with(
+            &answer,
+            "blocked.example",
+            RecordType::A,
+            FIXED_NOW,
+            &nothing,
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Bogus(why) if why.contains("extended error 17 (Filtered)")),
+            "{:?}",
+            report.status
+        );
+    }
+
+    /// The same kind of note on an answer that validates changes nothing.
+    /// 1.1.1.1 sends code 18 with good answers when one of a zone's name
+    /// servers refused it.
+    #[test]
+    fn extended_error_on_a_valid_answer_does_not_change_the_verdict() {
+        use crate::protocol::edns::ExtendedError;
+        let mut answer = DnsMessage::parse(CF_A).unwrap();
+        let edns = answer.edns.as_mut().expect("fixture has an OPT record");
+        for code in [15, 16, 17, 18] {
+            edns.extended_errors.push(ExtendedError {
+                code,
+                text: String::new(),
+            });
+        }
+        let report = validate_with(
+            &answer,
+            "cloudflare.com",
+            RecordType::A,
+            FIXED_NOW,
+            &cloudflare_chain,
+        )
+        .unwrap();
+        assert_eq!(report.status, ChainStatus::Secure);
+    }
+
+    #[test]
+    fn rsa_keys_under_1024_bits_make_a_signature_unusable() {
+        // RFC 3110 key: one-byte exponent length, exponent, modulus.
+        let rsa_key = |modulus_bytes: usize| {
+            let mut key = vec![3, 1, 0, 1];
+            key.push(0xC0);
+            key.extend(vec![0xAB; modulus_bytes - 1]);
+            key
+        };
+        assert_eq!(rsa_modulus_bits(&rsa_key(64)), Some(512));
+        assert_eq!(rsa_modulus_bits(&rsa_key(128)), Some(1024));
+        assert_eq!(rsa_modulus_bits(&[]), None);
+
+        let dnskey = |public_key: Vec<u8>, algorithm: u8| {
+            let mut raw = vec![1, 0, 3, algorithm];
+            raw.extend_from_slice(&public_key);
+            ResourceRecord {
+                name: "example.com.".to_string(),
+                rtype: RecordType::DNSKEY,
+                rclass: RecordClass::IN,
+                ttl: 300,
+                rdata: RData::DNSKEY {
+                    flags: 256,
+                    protocol: 3,
+                    algorithm,
+                    public_key,
+                },
+                raw_rdata: raw,
+            }
+        };
+        let rrsig_by = |key: &ResourceRecord, algorithm: u8| {
+            let mut sig = answers(CF_A)
+                .into_iter()
+                .find(|rr| rr.rtype == RecordType::RRSIG)
+                .unwrap();
+            if let RData::RRSIG {
+                algorithm: a,
+                key_tag: t,
+                ..
+            } = &mut sig.rdata
+            {
+                *a = algorithm;
+                *t = key_tag(&key.raw_rdata);
+            }
+            sig
+        };
+
+        let weak = dnskey(rsa_key(64), 8);
+        let strong = dnskey(rsa_key(128), 8);
+        assert!(!usable_signature(&rrsig_by(&weak, 8), &[&weak]));
+        assert!(usable_signature(&rrsig_by(&strong, 8), &[&strong]));
+        // An algorithm that is not implemented is unusable whatever the key.
+        assert!(!usable_signature(&rrsig_by(&strong, 5), &[&strong]));
+        // A signature whose key is not in the set is left to fail on its own.
+        assert!(usable_signature(&rrsig_by(&weak, 8), &[&strong]));
+
+        let weak_sig = rrsig_by(&weak, 8);
+        let strong_sig = rrsig_by(&strong, 8);
+        let keys = [&weak, &strong];
+        assert!(all_unsupported([&weak_sig].into_iter(), &keys));
+        assert!(!all_unsupported(
+            [&weak_sig, &strong_sig].into_iter(),
+            &keys
+        ));
+        assert!(!all_unsupported(std::iter::empty(), &keys));
+    }
+
+    /// A signed zone below an unsigned one: its parent cannot prove anything
+    /// about it, and the unsigned delegation further up settles the matter.
+    #[test]
+    fn signed_zone_under_an_unsigned_parent_is_insecure() {
+        let fetch = served(UNSIGNED_CHILD, &["org.", "dnssec-tools.org."]);
+        let report = chain_to_root(
+            "island.test.dnssec-tools.org.".to_string(),
+            FIXED_WILDCARD_NOW,
+            &fetch,
+            Vec::new(),
+            &mut vec!["dnssec-tools.org.".to_string()],
+        )
+        .unwrap();
+        assert!(
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("test.dnssec-tools.org. is an unsigned delegation")),
+            "{:?}",
+            report.status
+        );
     }
 }
