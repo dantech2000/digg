@@ -817,7 +817,7 @@ fn chain_to_root(
             // publishes no DS. Otherwise deleting the DS from a response would
             // turn any signed zone into an "unsigned" one.
             return match ds_denial(&ds_msg, &zone, now, fetch)? {
-                Delegation::Unsigned { signer, detail } => {
+                Delegation::Unsigned { signer, detail, .. } => {
                     links.push(LinkReport::ok(zone.clone(), detail));
                     let report = chain_to_root(signer, now, fetch, links, trusted)?;
                     Ok(match report.status {
@@ -1074,13 +1074,23 @@ fn classify_unsigned(
             continue;
         }
         match ds_denial(&ds_msg, cut, now, fetch)? {
-            Delegation::Unsigned { signer, detail } => {
+            Delegation::Unsigned {
+                signer,
+                detail,
+                certain,
+            } => {
                 links.push(LinkReport::ok(cut.clone(), detail));
                 let report = chain_to_root(signer, now, fetch, std::mem::take(links), trusted)?;
                 *links = report.links;
                 return Ok(match report.status {
-                    ChainStatus::Secure => ChainStatus::Insecure(format!(
+                    ChainStatus::Secure if certain => ChainStatus::Insecure(format!(
                         "{} is an unsigned delegation; answer cannot be validated",
+                        cut
+                    )),
+                    // An opt-out span lists no unsigned delegation, so it
+                    // cannot say whether this one exists.
+                    ChainStatus::Secure => ChainStatus::Insecure(format!(
+                        "{} has no DS and sits in an opt-out span, so it may be an unsigned delegation; answer cannot be validated",
                         cut
                     )),
                     other => other,
@@ -1109,7 +1119,12 @@ fn classify_unsigned(
 enum Delegation {
     /// An unsigned delegation: NS without DS, or an opt-out NSEC3 span that
     /// may hold one. `signer` is the parent zone that signed the proof.
-    Unsigned { signer: String, detail: String },
+    Unsigned {
+        signer: String,
+        detail: String,
+        /// False for an opt-out span, which shows only that there may be one.
+        certain: bool,
+    },
     /// The name exists in the parent zone and is not delegated.
     NotACut,
     /// No valid proof either way.
@@ -1124,6 +1139,26 @@ fn ds_denial(
     now: u32,
     fetch: &(dyn Fn(&str, RecordType) -> Result<DnsMessage, DnsError> + Sync),
 ) -> Result<Delegation, DnsError> {
+    // A DS query for a name that holds a CNAME is answered by following it, so
+    // the response carries the CNAME and no denial. A CNAME cannot sit at a
+    // delegation point, so a validly signed one settles the question.
+    let cname_sig = rrsigs_covering(&ds_msg.answers, RecordType::CNAME).find(|rr| {
+        names_equal(&rr.name, name)
+            && matches!(&rr.rdata, RData::RRSIG { signer, .. } if in_zone(name, signer))
+    });
+    if let Some(sig) = cname_sig {
+        let RData::RRSIG { signer, .. } = &sig.rdata else {
+            unreachable!("filtered on RRSIG above");
+        };
+        let cname: Vec<&ResourceRecord> =
+            owned_by(&ds_msg.answers, name, RecordType::CNAME).collect();
+        let keys_msg = fetch(signer, RecordType::DNSKEY)?;
+        let keys = records_of(&keys_msg.answers, RecordType::DNSKEY);
+        if !cname.is_empty() && verify_rrsig(&cname, sig, &keys, now).is_ok() {
+            return Ok(Delegation::NotACut);
+        }
+    }
+
     // DS lives on the parent side of a cut, so the proof must come from a zone
     // above `name`. The child's own NSEC at its apex says nothing about DS.
     let signer = ds_msg
@@ -1177,6 +1212,7 @@ fn delegation_proof(
                     "unsigned delegation proven: {} by {} has NS and no DS",
                     kind, signer
                 ),
+                certain: true,
             }
         } else {
             Delegation::NotACut
@@ -1228,6 +1264,7 @@ fn delegation_proof(
                     "unsigned delegation possible: opt-out NSEC3 by {} covers it",
                     signer
                 ),
+                certain: false,
             },
             Ok(_) => Delegation::Unproven(format!("{} does not exist in {}", name, signer)),
             Err(why) => Delegation::Unproven(why),
@@ -1639,12 +1676,77 @@ fn validate_denial(
         verified_denial_records(&answer.authority, RecordType::NSEC, &signer, &dnskeys, now);
     let nsec3_recs =
         verified_denial_records(&answer.authority, RecordType::NSEC3, &signer, &dnskeys, now);
-    let proven = if !nsec3_recs.is_empty() {
-        prove_nsec3(&nsec3_recs, qname, &signer, qtype, nxdomain)
-    } else if !nsec_recs.is_empty() {
-        prove_nsec(&nsec_recs, qname, qtype, nxdomain)
-    } else {
-        Err(format!("no validly signed {} record", denial_type))
+    // The records may be the parent's proof that an ancestor of qname is an
+    // unsigned delegation, sent because the answer continues in a zone the
+    // parent does not sign. Then there is nothing here to prove about qname
+    // itself, and classify_unsigned makes the call with its own DS lookups.
+    let qlabels: Vec<&str> = qname
+        .trim_end_matches('.')
+        .split('.')
+        .filter(|l| !l.is_empty())
+        .collect();
+    for depth in (label_count(&signer) + 1)..=qlabels.len() {
+        let ancestor = format!("{}.", qlabels[qlabels.len() - depth..].join("."));
+        if matches!(
+            delegation_proof(&nsec_recs, &nsec3_recs, &ancestor, &signer),
+            Delegation::Unsigned { certain: true, .. }
+        ) {
+            return Ok(DenialOutcome::Unsigned);
+        }
+    }
+
+    let prove =
+        |nsecs: &[&ResourceRecord], nsec3s: &[&ResourceRecord], ask: &mut Option<String>| {
+            if !nsec3s.is_empty() {
+                prove_nsec3(nsec3s, qname, &signer, qtype, nxdomain, ask)
+            } else if !nsecs.is_empty() {
+                prove_nsec(nsecs, qname, qtype, nxdomain, ask).map(Some)
+            } else {
+                Err(format!("no validly signed {} record", denial_type))
+            }
+        };
+    let mut ask = None;
+    let mut outcome = prove(&nsec_recs, &nsec3_recs, &mut ask);
+
+    // Some resolvers answer with the record that covers qname and leave out
+    // the one for the wildcard at the closest encloser, which RFC 4035 §3.1.3
+    // asks them to include. The proof is incomplete without it, and assuming
+    // the best would let a wildcard answer be replayed as a denial. So ask for
+    // the wildcard's own records and prove again with both sets. They are
+    // verified like any others; nothing is taken on the resolver's word.
+    let wildcard_msg;
+    if let (Err(_), Some(wildcard)) = (&outcome, ask.take()) {
+        wildcard_msg = fetch(&wildcard, qtype)?;
+        if owned_by(&wildcard_msg.answers, &wildcard, qtype)
+            .next()
+            .is_none()
+        {
+            let mut nsecs = nsec_recs.clone();
+            nsecs.extend(verified_denial_records(
+                &wildcard_msg.authority,
+                RecordType::NSEC,
+                &signer,
+                &dnskeys,
+                now,
+            ));
+            let mut nsec3s = nsec3_recs.clone();
+            nsec3s.extend(verified_denial_records(
+                &wildcard_msg.authority,
+                RecordType::NSEC3,
+                &signer,
+                &dnskeys,
+                now,
+            ));
+            outcome = prove(&nsecs, &nsec3s, &mut None);
+        }
+    }
+
+    let proven = match outcome {
+        Ok(Some(detail)) => Ok(detail),
+        // Validly signed, yet no proof: an opt-out span. The answer is as good
+        // as unsigned, and classify_unsigned reads the same span to say so.
+        Ok(None) => return Ok(DenialOutcome::Unsigned),
+        Err(reason) => Err(reason),
     };
 
     match proven {
@@ -1740,12 +1842,15 @@ fn canonical_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     la.len().cmp(&lb.len())
 }
 
-/// Prove NXDOMAIN or NODATA from NSEC records.
+/// Prove NXDOMAIN or NODATA from NSEC records. When the proof fails only
+/// because nothing in `nsecs` speaks for the wildcard at the closest encloser,
+/// `ask` is set to that wildcard's name: its own records would settle it.
 fn prove_nsec(
     nsecs: &[&ResourceRecord],
     qname: &str,
     qtype: RecordType,
     nxdomain: bool,
+    ask: &mut Option<String>,
 ) -> Result<String, String> {
     // NODATA: an NSEC whose owner is exactly qname, with qtype absent from its
     // type bitmap (and no CNAME, which would have been followed).
@@ -1763,24 +1868,65 @@ fn prove_nsec(
         }
     }
 
-    // NXDOMAIN: an NSEC whose range (owner, next_domain] strictly covers qname.
-    for rr in nsecs {
-        let RData::NSEC { next_domain, .. } = &rr.rdata else {
-            continue;
+    // Otherwise an NSEC whose range (owner, next_domain) strictly covers qname
+    // shows that qname has no record of its own.
+    let Some((cover, next_domain)) = nsecs.iter().find_map(|rr| match &rr.rdata {
+        RData::NSEC { next_domain, .. } if nsec_covers(rr, qname) => Some((rr, next_domain)),
+        _ => None,
+    }) else {
+        return Err("no NSEC covers the query name".to_string());
+    };
+    let range = format!("NSEC {} < {} < {}", cover.name, qname, next_domain);
+
+    // A name below qname exists, so qname is an empty non-terminal: it exists
+    // and owns nothing.
+    if in_zone(next_domain, qname) {
+        return if nxdomain {
+            Err(format!("{} exists as an empty non-terminal", qname))
+        } else {
+            Ok(format!(
+                "NODATA proven: {} is an empty non-terminal: {}",
+                qname, range
+            ))
         };
-        if nsec_covers(rr, qname) {
-            let what = if nxdomain {
-                "NXDOMAIN proven".to_string()
-            } else {
-                format!("NODATA proven: {} has no record of its own", qname)
-            };
-            return Ok(format!(
-                "{}: NSEC {} < {} < {}",
-                what, rr.name, qname, next_domain
-            ));
-        }
     }
-    Err("no NSEC covers the query name".to_string())
+
+    // That is half of the proof. A wildcard at the closest encloser would
+    // answer for qname, so the response must account for it as well (RFC 4035
+    // §5.4): show there is none for NXDOMAIN, or show the one there lacks the
+    // type for NODATA. Without this, the covering NSEC from a genuine wildcard
+    // answer could be replayed alone to deny a name the wildcard serves.
+    let depth =
+        common_suffix_labels(qname, &cover.name).max(common_suffix_labels(qname, next_domain));
+    let labels: Vec<&str> = qname.trim_end_matches('.').split('.').collect();
+    let encloser = labels[labels.len() - depth..].join(".");
+    let wildcard = format!("*.{}.", encloser).replace("..", ".");
+    let at_wildcard = nsecs.iter().find(|rr| names_equal(&rr.name, &wildcard));
+
+    if nxdomain {
+        if at_wildcard.is_some() {
+            return Err(format!("wildcard {} exists and would answer", wildcard));
+        }
+        if !nsecs.iter().any(|rr| nsec_covers(rr, &wildcard)) {
+            *ask = Some(wildcard.clone());
+            return Err(format!("wildcard {} is not denied", wildcard));
+        }
+        return Ok(format!("NXDOMAIN proven: {}, no wildcard", range));
+    }
+    let Some(RData::NSEC { type_bitmaps, .. }) = at_wildcard.map(|rr| &rr.rdata) else {
+        *ask = Some(wildcard.clone());
+        return Err(format!(
+            "{} has no record of its own, and no NSEC shows what wildcard {} holds",
+            qname, wildcard
+        ));
+    };
+    if type_bitmaps.contains(&qtype) || type_bitmaps.contains(&RecordType::CNAME) {
+        return Err(format!("wildcard {} would answer {}", wildcard, qtype));
+    }
+    Ok(format!(
+        "NODATA proven: {} has no record of its own and wildcard {} lacks {}: {}",
+        qname, wildcard, qtype, range
+    ))
 }
 
 /// Does this NSEC's range strictly cover `name` (owner < name < next_domain)?
@@ -1862,14 +2008,17 @@ fn nsec3_matches(rr: &ResourceRecord, hash: &[u8]) -> bool {
     nsec3_owner_hash(rr).as_deref() == Some(hash)
 }
 
-/// Prove NXDOMAIN or NODATA from NSEC3 records (RFC 5155 §8.4–8.6).
+/// Prove NXDOMAIN or NODATA from NSEC3 records (RFC 5155 §8.4-8.7).
+/// `Ok(None)` means the records are genuine but prove nothing: the name falls
+/// in an opt-out span, where an unsigned delegation may exist unlisted.
 fn prove_nsec3(
     nsec3s: &[&ResourceRecord],
     qname: &str,
     zone: &str,
     qtype: RecordType,
     nxdomain: bool,
-) -> Result<String, String> {
+    ask: &mut Option<String>,
+) -> Result<Option<String>, String> {
     let (iterations, salt) = match &nsec3s[0].rdata {
         RData::NSEC3 {
             iterations, salt, ..
@@ -1886,44 +2035,70 @@ fn prove_nsec3(
                     if type_bitmaps.contains(&qtype) {
                         return Err(format!("NSEC3 asserts {} exists", qtype));
                     }
-                    return Ok(format!(
+                    return Ok(Some(format!(
                         "NODATA proven: NSEC3 for {} lacks {}",
                         qname, qtype
-                    ));
+                    )));
                 }
             }
         }
     }
 
-    // NXDOMAIN: closest-encloser proof.
+    // Otherwise the closest-encloser proof shows qname has no record of its
+    // own, and the wildcard at the closest encloser must be accounted for.
     let proof = nsec3_closest_encloser(nsec3s, qname, zone)?;
-    let what = if nxdomain {
-        "NXDOMAIN proven".to_string()
-    } else {
-        format!("NODATA proven: {} has no record of its own", qname)
-    };
-    if proof.wildcard_denied || proof.opt_out {
-        Ok(format!(
-            "{}: closest encloser {}, next-closer covered{}",
-            what,
-            proof.encloser,
-            if proof.opt_out {
-                " (opt-out)"
-            } else {
-                ", wildcard covered"
-            }
-        ))
-    } else {
-        Err("wildcard existence not denied".to_string())
+    if proof.opt_out {
+        // RFC 5155 §6: unsigned delegations in an opt-out span have no NSEC3,
+        // so this cannot tell "does not exist" from "exists, unsigned". Taking
+        // it as proof would let the span's NSEC3 deny any unsigned zone under
+        // it, such as every unsigned name in com.
+        return Ok(None);
     }
+    let wildcard = format!("*.{}", proof.encloser);
+    match (&proof.wildcard, nxdomain) {
+        (WildcardAt::Denied, true) => Ok(Some(format!(
+            "NXDOMAIN proven: closest encloser {}, next-closer covered, wildcard covered",
+            proof.encloser
+        ))),
+        (WildcardAt::Present(_), true) => {
+            Err(format!("wildcard {} exists and would answer", wildcard))
+        }
+        (WildcardAt::Present(types), false) => {
+            if types.contains(&qtype) || types.contains(&RecordType::CNAME) {
+                Err(format!("wildcard {} would answer {}", wildcard, qtype))
+            } else {
+                Ok(Some(format!(
+                    "NODATA proven: {} has no record of its own and wildcard {} lacks {}: closest encloser {}",
+                    qname, wildcard, qtype, proof.encloser
+                )))
+            }
+        }
+        (WildcardAt::Denied, false) => Err(format!(
+            "{} has no record of its own and there is no wildcard {}, which is NXDOMAIN, not this answer",
+            qname, wildcard
+        )),
+        (WildcardAt::Unknown, _) => {
+            *ask = Some(wildcard.clone());
+            Err(format!("nothing shows whether wildcard {} exists", wildcard))
+        }
+    }
+}
+
+/// What the NSEC3 records say about the wildcard at the closest encloser.
+enum WildcardAt {
+    /// An NSEC3 covers its hash: there is none.
+    Denied,
+    /// An NSEC3 matches its hash: it exists, with these types.
+    Present(Vec<RecordType>),
+    /// Neither.
+    Unknown,
 }
 
 struct ClosestEncloser {
     encloser: String,
     /// The NSEC3 covering the next-closer name has opt-out set (RFC 5155 §8.6).
     opt_out: bool,
-    /// An NSEC3 covers or matches "*.<encloser>".
-    wildcard_denied: bool,
+    wildcard: WildcardAt,
 }
 
 /// RFC 5155 §8.3: find the closest encloser of `qname` and the NSEC3 that
@@ -1986,19 +2161,26 @@ fn nsec3_closest_encloser(
         return Err("no NSEC3 covers the next-closer name".to_string());
     };
 
-    // 3. Wildcard *.<closest-encloser> must also be covered (or opt-out set on
-    //    the next-closer NSEC3, RFC 5155 §8.6).
+    // 3. What the records say about the wildcard *.<closest-encloser>, and
+    //    whether the next-closer NSEC3 is opt-out (RFC 5155 §8.6).
     let opt_out = matches!(&nc_rr.rdata, RData::NSEC3 { flags, .. } if flags & 0x01 != 0);
-    let wildcard = format!("*.{}", ce);
-    let wc_hash = hash(&wildcard).ok_or("cannot hash wildcard")?;
-    let wildcard_denied = nsec3s
-        .iter()
-        .any(|rr| nsec3_covers(rr, &wc_hash) || nsec3_matches(rr, &wc_hash));
+    let wc_hash = hash(&format!("*.{}", ce)).ok_or("cannot hash wildcard")?;
+    let present = nsec3s.iter().find_map(|rr| match &rr.rdata {
+        RData::NSEC3 { type_bitmaps, .. } if nsec3_matches(rr, &wc_hash) => {
+            Some(type_bitmaps.clone())
+        }
+        _ => None,
+    });
+    let wildcard = match present {
+        Some(types) => WildcardAt::Present(types),
+        None if nsec3s.iter().any(|rr| nsec3_covers(rr, &wc_hash)) => WildcardAt::Denied,
+        None => WildcardAt::Unknown,
+    };
 
     Ok(ClosestEncloser {
         encloser: ce,
         opt_out,
-        wildcard_denied,
+        wildcard,
     })
 }
 
@@ -3773,7 +3955,7 @@ mod tests {
         assert!(!has_link(&report, "A RRSIG verified"));
         assert!(has_link(&report, "opt-out NSEC3 by net. covers it"));
         assert!(
-            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("cloudfront.net. is an unsigned delegation")),
+            matches!(&report.status, ChainStatus::Insecure(why) if why.contains("cloudfront.net. has no DS and sits in an opt-out span")),
             "{:?}",
             report.status
         );
@@ -4886,22 +5068,131 @@ mod tests {
         assert_eq!(check(&[ds(13, 3)]), Some("13".to_string()));
     }
 
+    /// A covering NSEC shows the name has no record of its own. Whether that
+    /// is NXDOMAIN, NODATA or a lie depends on the wildcard that could have
+    /// answered instead.
     #[test]
-    fn cover_proof_is_labelled_by_the_response_code() {
+    fn nsec_cover_proof_accounts_for_the_wildcard() {
         let gap = nsec("a.example.com.", "t.example.com.");
-        let nxdomain = prove_nsec(&[&gap], "sub.example.com.", RecordType::A, true).unwrap();
+        // example.com < *.example.com < a.example.com: no wildcard.
+        let no_wildcard = nsec("example.com.", "a.example.com.");
+        let prove = |nsecs: &[&ResourceRecord], nxdomain: bool| {
+            prove_nsec(
+                nsecs,
+                "sub.example.com.",
+                RecordType::A,
+                nxdomain,
+                &mut None,
+            )
+        };
+
+        let proven = prove(&[&gap, &no_wildcard], true).unwrap();
         assert!(
-            nxdomain.starts_with("NXDOMAIN proven: NSEC"),
+            proven.starts_with("NXDOMAIN proven: NSEC a.example.com. < sub.example.com. <"),
             "{}",
-            nxdomain
+            proven
         );
-        // NOERROR with the same proof: the answer came from a wildcard or an
-        // empty non-terminal, and the name was not denied outright.
-        let nodata = prove_nsec(&[&gap], "sub.example.com.", RecordType::A, false).unwrap();
+        // The cover alone: nothing says a wildcard would not have answered.
+        let alone = prove(&[&gap], true).unwrap_err();
         assert!(
-            nodata.starts_with("NODATA proven: sub.example.com. has no record of its own"),
+            alone.contains("wildcard *.example.com. is not denied"),
+            "{}",
+            alone
+        );
+        // A wildcard that exists makes NXDOMAIN false.
+        let with_txt = nsec_with("*.example.com.", "a.example.com.", &[RecordType::TXT]);
+        let exists = prove(&[&gap, &with_txt], true).unwrap_err();
+        assert!(exists.contains("exists and would answer"), "{}", exists);
+
+        // NOERROR with the same cover is NODATA, if the wildcard lacks the type.
+        let nodata = prove(&[&gap, &with_txt], false).unwrap();
+        assert!(
+            nodata.starts_with(
+                "NODATA proven: sub.example.com. has no record of its own and wildcard *.example.com. lacks A"
+            ),
             "{}",
             nodata
+        );
+        for types in [&[RecordType::A][..], &[RecordType::CNAME][..]] {
+            let answers = nsec_with("*.example.com.", "a.example.com.", types);
+            let err = prove(&[&gap, &answers], false).unwrap_err();
+            assert!(err.contains("would answer A"), "{}", err);
+        }
+        let unknown = prove(&[&gap], false).unwrap_err();
+        assert!(
+            unknown.contains("no NSEC shows what wildcard"),
+            "{}",
+            unknown
+        );
+    }
+
+    #[test]
+    fn nsec_cover_with_names_below_is_an_empty_non_terminal() {
+        let ent = nsec("a.example.com.", "x.sub.example.com.");
+        let nodata =
+            prove_nsec(&[&ent], "sub.example.com.", RecordType::A, false, &mut None).unwrap();
+        assert!(nodata.contains("is an empty non-terminal"), "{}", nodata);
+        // It exists, so NXDOMAIN for it is false.
+        assert!(prove_nsec(&[&ent], "sub.example.com.", RecordType::A, true, &mut None).is_err());
+    }
+
+    /// The forgery the wildcard check stops, with real records: take a genuine
+    /// wildcard answer, drop the answer, keep its proof, and call it NXDOMAIN.
+    #[test]
+    fn wildcard_answers_proof_cannot_be_replayed_as_nxdomain() {
+        for (wire, qname, zone, dnskey) in [
+            (
+                WILDCARD_NSEC,
+                "nope12345xyz.internet.nl",
+                "internet.nl.",
+                WILDCARD_NSEC_DNSKEY,
+            ),
+            (
+                WILDCARD_NSEC3,
+                "nope12345xyz.sidnlabs.nl",
+                "sidnlabs.nl.",
+                WILDCARD_NSEC3_DNSKEY,
+            ),
+        ] {
+            let mut answer = full_message(wire);
+            answer.answers.clear();
+            answer.header.rcode = Rcode::NxDomain;
+            let fetch = denial_fetch(zone, dnskey);
+            let outcome =
+                validate_denial(&answer, qname, RecordType::TXT, FIXED_WILDCARD_NOW, &fetch)
+                    .unwrap();
+            assert!(
+                matches!(outcome, DenialOutcome::Bogus { .. }),
+                "{}: a name the wildcard answers must not be deniable",
+                zone
+            );
+        }
+    }
+
+    /// net's NSEC3 covering cloudfront.net is opt-out. It is genuine and it
+    /// proves nothing about whether cloudfront.net exists.
+    #[test]
+    fn opt_out_span_is_not_a_denial() {
+        let mut answer = full_message(DS_CLOUDFRONT_NET);
+        answer.header.rcode = Rcode::NxDomain;
+        // Keep the NSEC3 records and their signatures. The fixture's SOA was
+        // re-signed minutes before capture, after FIXED_WILDCARD_NOW.
+        answer.authority.retain(|rr| {
+            rr.rtype == RecordType::NSEC3
+                || matches!(&rr.rdata, RData::RRSIG { type_covered, .. } if *type_covered == RecordType::NSEC3)
+        });
+        let fetch = denial_fetch("net.", NET_DNSKEY);
+        let outcome = validate_denial(
+            &answer,
+            "cloudfront.net",
+            RecordType::A,
+            FIXED_WILDCARD_NOW,
+            &fetch,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, DenialOutcome::Unsigned),
+            "an opt-out span must not prove NXDOMAIN for an unsigned zone"
         );
     }
 
@@ -4979,6 +5270,138 @@ mod tests {
             matches!(&report.status, ChainStatus::Insecure(why) if why.contains("no EDNS")),
             "{:?}",
             report.status
+        );
+    }
+
+    // The DS query for www.sidn.nl, which holds a CNAME: the resolver follows
+    // it and answers with the CNAME and the target's DS, and no denial.
+    const DS_AT_A_CNAME: &[u8] = &[
+        0x12, 0x34, 0x81, 0xA0, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x03, 0x77, 0x77,
+        0x77, 0x04, 0x73, 0x69, 0x64, 0x6E, 0x02, 0x6E, 0x6C, 0x00, 0x00, 0x2B, 0x00, 0x01, 0xC0,
+        0x0C, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x02, 0xC0, 0x10, 0xC0, 0x0C,
+        0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0E, 0x10, 0x00, 0x5B, 0x00, 0x05, 0x0D, 0x03, 0x00,
+        0x00, 0x0E, 0x10, 0x6A, 0xD9, 0x52, 0x00, 0x6A, 0xBD, 0xA2, 0x80, 0x78, 0x4A, 0x04, 0x73,
+        0x69, 0x64, 0x6E, 0x02, 0x6E, 0x6C, 0x00, 0x5F, 0x57, 0x1B, 0x42, 0x16, 0x26, 0xAE, 0xC6,
+        0xF7, 0x92, 0x08, 0xA2, 0x85, 0x50, 0x68, 0x51, 0x86, 0xDF, 0x9B, 0x9D, 0x38, 0x2A, 0x2F,
+        0x20, 0xD4, 0xC8, 0x7C, 0x18, 0x22, 0xB6, 0x68, 0xEB, 0x82, 0x03, 0x1C, 0x68, 0x03, 0xB7,
+        0x4E, 0x2C, 0xED, 0x0B, 0x28, 0xC4, 0x7D, 0x93, 0xBC, 0x1F, 0x5E, 0x2E, 0x6A, 0x3D, 0xDC,
+        0xE1, 0x17, 0xFC, 0x0D, 0x21, 0x40, 0xE5, 0x7D, 0x99, 0xAA, 0xD6, 0xC0, 0x10, 0x00, 0x2B,
+        0x00, 0x01, 0x00, 0x00, 0x0C, 0xCE, 0x00, 0x24, 0xF5, 0xE5, 0x0D, 0x02, 0xFB, 0xF6, 0x6B,
+        0x8D, 0x01, 0x9C, 0x1E, 0xEC, 0x27, 0x79, 0xB7, 0xDB, 0xFB, 0xFF, 0x09, 0x0C, 0xA0, 0xF3,
+        0x70, 0x4D, 0xCB, 0xD8, 0xD7, 0x6A, 0xA8, 0x09, 0x74, 0x18, 0x6F, 0x11, 0x0E, 0x91, 0xC0,
+        0x10, 0x00, 0x2E, 0x00, 0x01, 0x00, 0x00, 0x0C, 0xCE, 0x00, 0x56, 0x00, 0x2B, 0x0D, 0x02,
+        0x00, 0x00, 0x0E, 0x10, 0x6A, 0xE5, 0x9C, 0xA3, 0x6A, 0xC0, 0x8D, 0xB4, 0xED, 0xAF, 0x02,
+        0x6E, 0x6C, 0x00, 0xE4, 0xCE, 0xC9, 0x5A, 0x3F, 0x7F, 0xCB, 0x59, 0xAE, 0xE2, 0x0C, 0x8C,
+        0x61, 0x4D, 0x5A, 0x47, 0xBC, 0xAD, 0x03, 0xDD, 0x94, 0xEE, 0x12, 0x24, 0x12, 0x7E, 0x2C,
+        0x5D, 0xB4, 0x58, 0x7B, 0x5E, 0x07, 0x69, 0xF5, 0x8E, 0x22, 0x74, 0x30, 0x0E, 0x4D, 0xEE,
+        0x67, 0xEF, 0xB0, 0x3E, 0x8A, 0xF3, 0xE2, 0x09, 0x92, 0x9D, 0x3A, 0x8B, 0x6D, 0x59, 0x77,
+        0x26, 0x78, 0xE6, 0x7D, 0x80, 0xF5, 0xA2, 0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x80,
+        0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn signed_cname_at_a_name_shows_it_is_not_a_delegation() {
+        let fetch = zone_keys(&[("sidn.nl.", SIDN_DNSKEY)]);
+        let ds_msg = full_message(DS_AT_A_CNAME);
+        assert!(ds_msg.authority.is_empty(), "fixture carries no denial");
+        let found = ds_denial(&ds_msg, "www.sidn.nl.", FIXED_WILDCARD_NOW, &fetch).unwrap();
+        assert!(matches!(found, Delegation::NotACut));
+
+        // The same CNAME with its signature removed says nothing.
+        let mut unsigned = full_message(DS_AT_A_CNAME);
+        unsigned.answers.retain(|rr| rr.rtype != RecordType::RRSIG);
+        let found = ds_denial(&unsigned, "www.sidn.nl.", FIXED_WILDCARD_NOW, &fetch).unwrap();
+        assert!(matches!(found, Delegation::Unproven(_)));
+    }
+
+    /// A negative answer for a name in an unsigned child zone can arrive with
+    /// the parent's proof of that unsigned delegation in its authority
+    /// section. That is not a failed denial of the name.
+    #[test]
+    fn unsigned_delegation_proof_in_a_negative_answer_is_not_bogus() {
+        // dnssec-tools.org's NSEC for test.dnssec-tools.org: NS, no DS.
+        let answer = full_message(DS_TEST_DNSSEC_TOOLS);
+        let fetch = denial_fetch("dnssec-tools.org.", DNSSEC_TOOLS_DNSKEY);
+        let outcome = validate_denial(
+            &answer,
+            "www.test.dnssec-tools.org",
+            RecordType::A,
+            FIXED_WILDCARD_NOW,
+            &fetch,
+        )
+        .unwrap();
+        assert!(matches!(outcome, DenialOutcome::Unsigned));
+    }
+
+    /// Some resolvers send the NSEC that covers the name and leave out the one
+    /// for the wildcard. The validator fetches the wildcard's records itself.
+    #[test]
+    fn missing_wildcard_record_is_fetched_to_complete_the_proof() {
+        // The covering NSEC from the wildcard fixture, as the whole authority
+        // section of a NOERROR answer with no data.
+        let mut answer = full_message(WILDCARD_NSEC);
+        answer.answers.clear();
+        let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
+            match (name, rtype) {
+                ("internet.nl.", RecordType::DNSKEY) => DnsMessage::parse(WILDCARD_NSEC_DNSKEY),
+                // *.internet.nl's own NSEC: it holds TXT and nothing else.
+                ("*.internet.nl.", _) => DnsMessage::parse(WILDCARD_OWNER_NSEC),
+                other => panic!("unexpected fetch: {:?}", other),
+            }
+        };
+        let validate = |qtype: RecordType| {
+            validate_denial(
+                &answer,
+                "nope12345xyz.internet.nl",
+                qtype,
+                FIXED_WILDCARD_NOW,
+                &fetch,
+            )
+            .unwrap()
+        };
+
+        // The wildcard has no HINFO, so NODATA for HINFO is true.
+        match validate(RecordType::Unknown(13)) {
+            DenialOutcome::Proven { denial_links, .. } => assert!(denial_links
+                .iter()
+                .any(|l| l.detail.contains("wildcard *.internet.nl. lacks"))),
+            _ => panic!("expected the fetched wildcard NSEC to complete the proof"),
+        }
+        // It does have TXT, so an empty answer for TXT is a lie.
+        assert!(matches!(
+            validate(RecordType::TXT),
+            DenialOutcome::Bogus { reason, .. } if reason.contains("would answer TXT")
+        ));
+    }
+
+    #[test]
+    fn soa_mailbox_with_a_dot_keeps_its_labels_in_canonical_form() {
+        // hostmaster for "first.last@example.com": the first label holds a dot.
+        let mut rname = vec![10];
+        rname.extend_from_slice(b"first.last");
+        rname.extend(encode_name("example.com.").unwrap());
+        let (decoded, _) = crate::protocol::name::decode_name(&rname, 0).unwrap();
+        let rr = ResourceRecord {
+            name: "example.com.".to_string(),
+            rtype: RecordType::SOA,
+            rclass: RecordClass::IN,
+            ttl: 300,
+            rdata: RData::SOA {
+                mname: "ns.example.com.".to_string(),
+                rname: decoded,
+                serial: 1,
+                refresh: 2,
+                retry: 3,
+                expire: 4,
+                minimum: 5,
+            },
+            raw_rdata: Vec::new(),
+        };
+        let canonical = canonical_rdata(&rr).unwrap();
+        let mname = encode_name("ns.example.com.").unwrap();
+        assert_eq!(
+            &canonical[mname.len()..mname.len() + rname.len()],
+            &rname[..]
         );
     }
 }
