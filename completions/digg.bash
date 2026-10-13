@@ -8,7 +8,7 @@ _digg() {
 +idnin +noidnin +idnout +noidnout +propagation +prop +bench +watch +doh \
 +timeout= +retry= +bench= +watch= +doh= +subnet="
     local dash_flags="-x -p -c -f -h -V --help --version"
-    local types="A AAAA NS CNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY \
+    local types="A AAAA NS CNAME DNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY \
 NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY"
     local servers="@1.1.1.1 @8.8.8.8 @9.9.9.9"
 

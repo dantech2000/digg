@@ -151,6 +151,7 @@ mod tests {
             ("TXT", RecordType::TXT),
             ("SOA", RecordType::SOA),
             ("SRV", RecordType::SRV),
+            ("DNAME", RecordType::DNAME),
             ("DS", RecordType::DS),
             ("RRSIG", RecordType::RRSIG),
             ("NSEC", RecordType::NSEC),

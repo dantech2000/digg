@@ -14,6 +14,7 @@ pub enum RData {
     NS(String),
     CNAME(String),
     PTR(String),
+    DNAME(String),
     MX {
         preference: u16,
         exchange: String,
@@ -181,6 +182,7 @@ impl fmt::Display for RData {
             RData::NS(name) => write!(f, "{}", name),
             RData::CNAME(name) => write!(f, "{}", name),
             RData::PTR(name) => write!(f, "{}", name),
+            RData::DNAME(name) => write!(f, "{}", name),
             RData::MX {
                 preference,
                 exchange,
@@ -376,6 +378,7 @@ impl RData {
             RData::NS(_)
                 | RData::CNAME(_)
                 | RData::PTR(_)
+                | RData::DNAME(_)
                 | RData::MX { .. }
                 | RData::SRV { .. }
                 | RData::SVCB { .. }
@@ -488,6 +491,10 @@ fn parse_rdata(
         RecordType::PTR => {
             let (name, _) = decode_name(buf, offset)?;
             Ok(RData::PTR(name))
+        }
+        RecordType::DNAME => {
+            let (name, _) = decode_name(buf, offset)?;
+            Ok(RData::DNAME(name))
         }
         RecordType::MX => {
             if rdlength < 3 {
@@ -892,6 +899,10 @@ mod tests {
         assert_eq!(
             RData::PTR("host.example.com.".into()).to_string(),
             "host.example.com."
+        );
+        assert_eq!(
+            RData::DNAME("example.net.".into()).to_string(),
+            "example.net."
         );
         assert_eq!(
             RData::MX {

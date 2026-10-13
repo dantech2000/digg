@@ -282,7 +282,7 @@ stdout and per-query failures to stderr, so pipelines see clean data.
 
 ## Supported Record Types
 
-A, AAAA, NS, MX, CNAME, TXT, SOA, PTR, SRV, CAA, HTTPS, SVCB, DS, RRSIG, DNSKEY, NSEC, NSEC3, NSEC3PARAM, OPT, AXFR, ANY — plus any numeric type via RFC 3597 `TYPE<N>` syntax (e.g. `digg example.com TYPE64512`)
+A, AAAA, NS, MX, CNAME, DNAME, TXT, SOA, PTR, SRV, CAA, HTTPS, SVCB, DS, RRSIG, DNSKEY, NSEC, NSEC3, NSEC3PARAM, OPT, AXFR, ANY — plus any numeric type via RFC 3597 `TYPE<N>` syntax (e.g. `digg example.com TYPE64512`)
 
 ## License
 

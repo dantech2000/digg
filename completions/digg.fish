@@ -16,7 +16,7 @@ for provider in cloudflare google quad9 opendns adguard wikimedia
 end
 
 # record types
-complete -c digg -a "A AAAA NS CNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY"
+complete -c digg -a "A AAAA NS CNAME DNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY"
 
 # well-known resolvers
 complete -c digg -a "@1.1.1.1 @8.8.8.8 @9.9.9.9"

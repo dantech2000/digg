@@ -548,7 +548,9 @@ fn canonical_name(name: &str) -> Result<Vec<u8>, DnsError> {
 /// everything else is the raw wire bytes.
 fn canonical_rdata(rr: &ResourceRecord) -> Result<Vec<u8>, DnsError> {
     match &rr.rdata {
-        RData::NS(name) | RData::CNAME(name) | RData::PTR(name) => canonical_name(name),
+        RData::NS(name) | RData::CNAME(name) | RData::PTR(name) | RData::DNAME(name) => {
+            canonical_name(name)
+        }
         RData::MX {
             preference,
             exchange,
