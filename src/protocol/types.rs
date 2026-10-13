@@ -68,6 +68,7 @@ record_types! {
     TXT        =  16, "TXT";
     AAAA       =  28, "AAAA";
     SRV        =  33, "SRV";
+    DNAME      =  39, "DNAME";
     OPT        =  41, "OPT";
     DS         =  43, "DS";
     RRSIG      =  46, "RRSIG";

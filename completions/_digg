@@ -35,7 +35,7 @@ _digg() {
         '+doh=[DoH provider or URL]:provider:(cloudflare google quad9 opendns adguard wikimedia)'
         '+subnet=[EDNS client subnet IP/prefix]:subnet:'
     )
-    types=(A AAAA NS CNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY)
+    types=(A AAAA NS CNAME DNAME PTR MX TXT SOA SRV DS RRSIG NSEC DNSKEY NSEC3 NSEC3PARAM CAA SVCB HTTPS AXFR ANY)
     servers=('@1.1.1.1' '@8.8.8.8' '@9.9.9.9')
 
     _arguments -s \

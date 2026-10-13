@@ -489,8 +489,8 @@ pub fn print_usage() {
                     Multiple @server args enable comparison mode
     {cyan}name{reset}            Domain name to query {dim}(default: .){reset}
                     IP addresses auto-detect as reverse PTR lookups
-    {cyan}type{reset}            Record type: A AAAA NS MX CNAME TXT SOA PTR SRV CAA
-                    HTTPS SVCB DS RRSIG DNSKEY NSEC NSEC3 AXFR ANY
+    {cyan}type{reset}            Record type: A AAAA NS MX CNAME DNAME TXT SOA PTR SRV
+                    CAA HTTPS SVCB DS RRSIG DNSKEY NSEC NSEC3 AXFR ANY
                     TYPE{dim}N{reset} queries an arbitrary numeric type (RFC 3597)
                     {dim}(default: A, case-insensitive){reset}
 
