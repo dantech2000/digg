@@ -120,18 +120,29 @@ fn bogus(
 /// queries through the given resolver and verifying everything locally.
 #[allow(clippy::too_many_arguments)]
 pub fn validate(
-    server: &str,
-    port: u16,
+    send: &(dyn Fn(&[u8]) -> Result<transport::QueryResult, DnsError> + Sync),
     answer: &DnsMessage,
     qname: &str,
     qtype: RecordType,
-    timeout: Duration,
     cd: bool,
 ) -> Result<ValidationReport, DnsError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
+    validate_at(send, answer, qname, qtype, cd, now)
+}
+
+/// `validate` with the clock passed in. Every lookup goes out through `send`,
+/// which is whatever transport the answer itself came over.
+fn validate_at(
+    send: &(dyn Fn(&[u8]) -> Result<transport::QueryResult, DnsError> + Sync),
+    answer: &DnsMessage,
+    qname: &str,
+    qtype: RecordType,
+    cd: bool,
+    now: u32,
+) -> Result<ValidationReport, DnsError> {
     let fetch = |name: &str, rtype: RecordType| -> Result<DnsMessage, DnsError> {
         let edns = EdnsOptions {
             dnssec_ok: true,
@@ -146,10 +157,7 @@ pub fn validate(
             Some(&edns),
         )?;
         complete_response(name, rtype, Duration::from_millis(150), || {
-            let result =
-                transport::send_query_with_retries(server, port, &query, false, timeout, 2)?
-                    .verify_id(id)?;
-            Ok(result.message)
+            Ok(send(&query)?.verify_id(id)?.message)
         })
     };
     validate_with(answer, qname, qtype, now, &fetch)
@@ -6033,5 +6041,50 @@ mod tests {
             "{:?}",
             report.status
         );
+    }
+
+    /// Every lookup the validator makes goes through the sender it was given,
+    /// with the DO bit set, and its answer is matched to the query by ID.
+    #[test]
+    fn validation_lookups_go_through_the_callers_transport() {
+        use crate::transport::{QueryResult, TransportProtocol};
+        let seen: Mutex<Vec<(String, RecordType, bool)>> = Mutex::new(Vec::new());
+        let send = |query: &[u8]| -> Result<QueryResult, DnsError> {
+            let parsed = DnsMessage::parse(query)?;
+            let question = &parsed.questions[0];
+            let do_bit = parsed.edns.as_ref().is_some_and(|e| e.dnssec_ok);
+            seen.lock()
+                .unwrap()
+                .push((question.name.clone(), question.qtype, do_bit));
+            // Answer from the fixtures, under the ID the query used.
+            let wire: &[u8] = match (question.name.as_str(), question.qtype) {
+                ("cloudflare.com.", RecordType::DNSKEY) => CF_DNSKEY,
+                ("cloudflare.com.", RecordType::DS) => COM_DS,
+                ("com.", RecordType::DNSKEY) => COM_DNSKEY,
+                ("com.", RecordType::DS) => COM_DS_AT_ROOT,
+                (".", RecordType::DNSKEY) => ROOT_DNSKEY,
+                other => panic!("unexpected lookup: {:?}", other),
+            };
+            let mut wire = wire.to_vec();
+            wire[..2].copy_from_slice(&query[..2]);
+            QueryResult::from_wire(&wire, Duration::ZERO, TransportProtocol::DoT)
+        };
+        let answer = DnsMessage::parse(CF_A).unwrap();
+        let report = validate_at(
+            &send,
+            &answer,
+            "cloudflare.com",
+            RecordType::A,
+            false,
+            FIXED_NOW,
+        )
+        .unwrap();
+        assert_eq!(report.status, ChainStatus::Secure);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 5, "{:?}", seen);
+        assert!(seen.iter().all(|(_, _, do_bit)| *do_bit));
+        assert!(seen.contains(&("cloudflare.com.".to_string(), RecordType::DNSKEY, true)));
+        assert!(seen.contains(&(".".to_string(), RecordType::DNSKEY, true)));
     }
 }
